@@ -86,7 +86,16 @@ def get_train_steps(num_examples):
 class WarmUpAndCosineDecay(tf.keras.optimizers.schedules.LearningRateSchedule):
     """Applies a warmup schedule on a given learning rate decay schedule."""
 
-    def __init__(self, base_learning_rate, num_examples, warmup_epochs, total_epochs, train_batch_size, learning_rate_scaling, name=None):
+    def __init__(
+        self,
+        base_learning_rate,
+        num_examples,
+        warmup_epochs,
+        total_epochs,
+        train_batch_size,
+        learning_rate_scaling,
+        name=None,
+    ):
         super(WarmUpAndCosineDecay, self).__init__()
         self.warmup_epochs = warmup_epochs
         self.train_batch_size = train_batch_size
@@ -226,9 +235,7 @@ class ProjectionHead(tf.keras.layers.Layer):
         hiddens_list = [tf.identity(inputs, "proj_head_input")]
         if self.head_mode == "linear":
             assert len(self.linear_layers) == 1, len(self.linear_layers)
-            hiddens_list.append(
-                self.linear_layers[0](hiddens_list[-1], training)
-            )
+            hiddens_list.append(self.linear_layers[0](hiddens_list[-1], training))
             return hiddens_list
         elif self.head_mode == "nonlinear":
             for j in range(self.num_layers):
@@ -296,7 +303,12 @@ class Model(tf.keras.models.Model):
                 sk_ratio=sk_ratio,
             )
             self._projection_head = ProjectionHead(
-                proj_out_dim, num_proj_layers, ft_proj_selector, head_mode, use_bias, use_bn
+                proj_out_dim,
+                num_proj_layers,
+                ft_proj_selector,
+                head_mode,
+                use_bias,
+                use_bn,
             )
             if train_mode == "finetune":
                 self.supervised_head = SupervisedHead(num_classes)
@@ -382,35 +394,37 @@ class Model(tf.keras.models.Model):
                 else:
                     loss += sup_loss
 
-        # labels = tf.keras.utils.to_categorical(labels, self.num_classes)
-
             if not self.compiled_metrics._built:
                 self.compiled_metrics.build(logits, labels)
 
-            supervised_loss_metric = self.metrics[self.metrics_names.index('train/supervised_loss')]
-            supervised_acc_metric = self.metrics[self.metrics_names.index('train/supervised_acc')]
+            supervised_loss_metric = self.metrics[
+                self.metrics_names.index("train/supervised_loss")
+            ]
+            supervised_acc_metric = self.metrics[
+                self.metrics_names.index("train/supervised_acc")
+            ]
             metrics.update_finetune_metrics_train(
                 supervised_loss_metric, supervised_acc_metric, sup_loss, labels, logits
             )
-            weight_decay = add_weight_decay(self, self.weight_decay, self.optimizer_name, adjust_per_optimizer=True)
-            self.metrics[self.metrics_names.index('train/weight_decay')].update_state(weight_decay)
+            weight_decay = add_weight_decay(
+                self, self.weight_decay, self.optimizer_name, adjust_per_optimizer=True
+            )
+            self.metrics[self.metrics_names.index("train/weight_decay")].update_state(
+                weight_decay
+            )
             loss += weight_decay
-            self.metrics[self.metrics_names.index('train/total_loss')].update_state(loss)  # update total_loss metric
+            self.metrics[self.metrics_names.index("train/total_loss")].update_state(
+                loss
+            )  # update total_loss metric
             # The default behavior of `apply_gradients` is to sum gradients from all
             # replicas so we divide the loss by the number of replicas so that the
             # mean gradient is applied.
             loss = loss / strategy.num_replicas_in_sync
-            # logging.info("Trainable variables:")
-            # for var in model.trainable_variables:
-            #     logging.info(var.name)
         grads = tape.gradient(loss, self.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
         return {m.name: m.result() for m in self.metrics}
+
     def model(self, input_shape):
         # https://stackoverflow.com/questions/55235212/model-summary-cant-print-output-shape-while-using-subclass-model
         x = tf.keras.layers.Input(input_shape)
         return tf.keras.Model(inputs=[x], outputs=self(x))
-
-
-def test_model_lib():
-    print(f"num_classes = {num_classes}", f"image_size = {image_size}")

@@ -33,8 +33,10 @@ data_args.add_argument(
     help="CSV file that maps int labels to class names, e.g., 0, Arm cover\n1, Other rover part",
 )
 data_args.add_argument(
-    "--ext", type=str, default="jpg", help="Extension of the images in data_dir"
-)
+    "--ext",
+    type=str,
+    default="jpg",
+    help="Extension of the images in data_dir")
 data_args.add_argument(
     "--image_size",
     type=int,
@@ -49,7 +51,11 @@ data_args.add_argument(
 )
 
 train_args = parser.add_argument_group("Training params")
-train_args.add_argument("--batch_size", type=int, default=32, help="Batch size")
+train_args.add_argument(
+    "--batch_size",
+    type=int,
+    default=32,
+    help="Batch size")
 train_args.add_argument(
     "--epochs", type=int, default=30, help="Number of epochs to train for"
 )
@@ -60,33 +66,47 @@ train_args.add_argument(
     help="Number of epochs between checkpoints/summaries",
 )
 train_args.add_argument(
-    "--gpu_ids", type=int, nargs="+", default=[], help="List of GPU IDs to use in parallel"
-)
+    "--gpu_ids",
+    type=int,
+    nargs="+",
+    default=[],
+    help="List of GPU IDs to use in parallel")
 train_args.add_argument(
     "--resnet_depth", type=int, default=50, help="Resnet depth"
 )
 train_args.add_argument(
-    "--optimizer", type=str, default="lars", help="Optimizer to use. Choices: ['adam', 'lars', 'SGD']"
-)
+    "--optimizer",
+    type=str,
+    default="lars",
+    help="Optimizer to use. Choices: ['adam', 'lars', 'SGD']")
 train_args.add_argument(
-    "--learning_rate", type=float, default=0.3, help="Initial lr per batch size of 256"
-)
+    "--learning_rate",
+    type=float,
+    default=0.3,
+    help="Initial lr per batch size of 256")
 train_args.add_argument(
-    "--learning_rate_scaling", type=str, default='linear', help='How to scale the learning rate as a function of batch size. Can be `linear` or `sqrt`'
-)
+    "--learning_rate_scaling",
+    type=str,
+    default='linear',
+    help='How to scale the learning rate as a function of batch size. Can be `linear` or `sqrt`')
 train_args.add_argument(
     "--warmup_epochs", type=int, default=5, help="Number of epochs of warmup"
 )
 train_args.add_argument(
-    "--momentum", type=float, default=0.9, help="Momentum param for lars and SGD optimizers"
-)
+    "--momentum",
+    type=float,
+    default=0.9,
+    help="Momentum param for lars and SGD optimizers")
 train_args.add_argument(
-    "--weight_decay", type=float, default=1e-6, help='Amount of weight decay to use'
-)
+    "--weight_decay",
+    type=float,
+    default=1e-6,
+    help='Amount of weight decay to use')
 
 train_args.add_argument(
-    "--run_eagerly", action='store_true', help="Set eager tracing to true for debugging"
-)
+    "--run_eagerly",
+    action='store_true',
+    help="Set eager tracing to true for debugging")
 
 # def try_restore_from_checkpoint(model, global_step, optimizer):
 #   """Restores the latest ckpt if it exists, otherwise check FLAGS.checkpoint."""
@@ -143,17 +163,22 @@ if __name__ == "__main__":
         class_mapping = None
 
     X, num_files, num_classes, class_mapping = get_files_and_labels(
-        img_folder, ext=args.ext, metadata_file=file_list, mapping=class_mapping
-    )
+        img_folder, ext=args.ext, metadata_file=file_list, mapping=class_mapping)
     classes = list(class_mapping.keys())
 
-    ds = get_tf_dataset(X, args.ext, preprocess=True, width=image_size, height=image_size)
+    ds = get_tf_dataset(
+        X,
+        args.ext,
+        preprocess=True,
+        width=image_size,
+        height=image_size)
 
     if len(args.gpu_ids) > 1:
         strategy = tf.distribute.MirroredStrategy(
             devices=[f"/gpu:{int(d)}" for d in args.gpu_ids]
         )
-        print(f"Running using MirroredStrategy on {strategy.num_replicas_in_sync} replicas")
+        print(
+            f"Running using MirroredStrategy on {strategy.num_replicas_in_sync} replicas")
     else:
         if len(args.gpu_ids) == 1:
             d = args.gpu_ids[0]
@@ -181,7 +206,8 @@ if __name__ == "__main__":
             args.batch_size,
             args.learning_rate_scaling,
         )
-        optimizer = model_lib.build_optimizer(learning_rate, args.optimizer, args.momentum)
+        optimizer = model_lib.build_optimizer(
+            learning_rate, args.optimizer, args.momentum)
 
         # Build metrics
         weight_decay_metric = tf.keras.metrics.Mean('train/weight_decay')
@@ -189,8 +215,10 @@ if __name__ == "__main__":
         supervised_loss_metric = tf.keras.metrics.Mean("train/supervised_loss")
         supervised_acc_metric = tf.keras.metrics.Mean("train/supervised_acc")
         all_metrics = [
-            weight_decay_metric, total_loss_metric, supervised_loss_metric, supervised_acc_metric
-        ]
+            weight_decay_metric,
+            total_loss_metric,
+            supervised_loss_metric,
+            supervised_acc_metric]
         metrics_dict = {
             "weight_decay": weight_decay_metric,
             "total_loss": total_loss_metric,

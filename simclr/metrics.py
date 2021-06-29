@@ -19,83 +19,65 @@ from absl import logging
 
 import tensorflow.compat.v2 as tf
 
-# class WeightDecayMetric(tf.keras.metrics.Metric):
-#   def __init__(self, name="train/weight_decay", **kwargs):
-#     super(WeightDecayMetric, self).__init__(name=name, **kwargs)
 
-#   def update_state(self)
+def update_pretrain_metrics_train(
+    contrast_loss, contrast_acc, contrast_entropy, loss, logits_con, labels_con
+):
+    """Updated pretraining metrics."""
+    contrast_loss.update_state(loss)
 
+    contrast_acc_val = tf.equal(tf.argmax(labels_con, 1), tf.argmax(logits_con, axis=1))
+    contrast_acc_val = tf.reduce_mean(tf.cast(contrast_acc_val, tf.float32))
+    contrast_acc.update_state(contrast_acc_val)
 
-def update_pretrain_metrics_train(contrast_loss, contrast_acc, contrast_entropy,
-                                  loss, logits_con, labels_con):
-  """Updated pretraining metrics."""
-  contrast_loss.update_state(loss)
-
-  contrast_acc_val = tf.equal(
-      tf.argmax(labels_con, 1), tf.argmax(logits_con, axis=1))
-  contrast_acc_val = tf.reduce_mean(tf.cast(contrast_acc_val, tf.float32))
-  contrast_acc.update_state(contrast_acc_val)
-
-  prob_con = tf.nn.softmax(logits_con)
-  entropy_con = -tf.reduce_mean(
-      tf.reduce_sum(prob_con * tf.math.log(prob_con + 1e-8), -1))
-  contrast_entropy.update_state(entropy_con)
+    prob_con = tf.nn.softmax(logits_con)
+    entropy_con = -tf.reduce_mean(
+        tf.reduce_sum(prob_con * tf.math.log(prob_con + 1e-8), -1)
+    )
+    contrast_entropy.update_state(entropy_con)
 
 
-def update_pretrain_metrics_eval(contrast_loss_metric,
-                                 contrastive_top_1_accuracy_metric,
-                                 contrastive_top_5_accuracy_metric,
-                                 contrast_loss, logits_con, labels_con):
-  contrast_loss_metric.update_state(contrast_loss)
-  contrastive_top_1_accuracy_metric.update_state(
-      tf.argmax(labels_con, 1), tf.argmax(logits_con, axis=1))
-  contrastive_top_5_accuracy_metric.update_state(labels_con, logits_con)
+def update_pretrain_metrics_eval(
+    contrast_loss_metric,
+    contrastive_top_1_accuracy_metric,
+    contrastive_top_5_accuracy_metric,
+    contrast_loss,
+    logits_con,
+    labels_con,
+):
+    contrast_loss_metric.update_state(contrast_loss)
+    contrastive_top_1_accuracy_metric.update_state(
+        tf.argmax(labels_con, 1), tf.argmax(logits_con, axis=1)
+    )
+    contrastive_top_5_accuracy_metric.update_state(labels_con, logits_con)
 
 
-def update_finetune_metrics_train(supervised_loss_metric, supervised_acc_metric,
-                                  loss, labels, logits):
-  supervised_loss_metric.update_state(loss)
-  # if labels is one-hot encoded, we decode it first
-  # labels = tf.cond(
-  #   tf.math.logical_and(tf.rank(labels) == 2, labels.shape[-1] == 1),
-  #   true_fn=tf.squeeze(labels),
-  #   false_fn=tf.cast(tf.squeeze(tf.argmax(labels, 1)), dtype=tf.int32)
-  # )
-  # labels = tf.cond(
-  #   tf.math.logical_and(tf.rank(labels) == 2, labels.shape[1] == logits.shape[1]),
-  #   true_fn=tf.cast(tf.squeeze(tf.argmax(labels, 1)), dtype=tf.int32),
-  #   false_fn=None  # do nothing
-  # )
-  # if tf.math.equal(tf.rank(labels), 2) and tf.math.equal(labels.shape[1], 1): # (batch_size, 1)
-  #   labels = tf.squeeze(labels)
-  # elif tf.math.equal(tf.rank(labels), 2) and tf.math.equal(labels.shape[1], logits.shape[1]): # (batch_size, num_classes)
-  #   labels = tf.cast(tf.squeeze(tf.argmax(labels, 1)), dtype=tf.int32)
-  label_acc = tf.equal(labels, tf.cast(tf.argmax(logits, 1), dtype=tf.int32))
+def update_finetune_metrics_train(
+    supervised_loss_metric, supervised_acc_metric, loss, labels, logits
+):
+    supervised_loss_metric.update_state(loss)
+    # labels must NOT be one-hot encoded; otherwise do argmax on labels too
+    label_acc = tf.equal(labels, tf.cast(tf.argmax(logits, 1), dtype=tf.int32))
 
-  label_acc = tf.reduce_mean(tf.cast(label_acc, tf.float32))
-  supervised_acc_metric.update_state(label_acc)
+    label_acc = tf.reduce_mean(tf.cast(label_acc, tf.float32))
+    supervised_acc_metric.update_state(label_acc)
 
 
-def update_finetune_metrics_eval(label_top_1_accuracy_metrics,
-                                 label_top_5_accuracy_metrics, outputs, labels):
-  # if labels is one-hot encoded, we decode it first
-  if tf.math.equal(tf.rank(labels), 2) and tf.math.equal(labels.shape[1], 1): # (batch_size, 1)
-    labels = tf.squeeze(labels)
-  elif tf.math.equal(tf.rank(labels), 2) and tf.math.equal(labels.shape[1], outputs.shape[1]): # (batch_size, num_classes)
-    labels = tf.cast(tf.squeeze(tf.argmax(labels, 1)), dtype=tf.int32)
-
-  label_top_1_accuracy_metrics.update_state(
-      labels, tf.argmax(outputs, axis=1))
-  label_top_5_accuracy_metrics.update_state(labels, outputs)
+def update_finetune_metrics_eval(
+    label_top_1_accuracy_metrics, label_top_5_accuracy_metrics, outputs, labels
+):
+    # labels must NOT be one-hot encoded; otherwise do argmax on labels too
+    label_top_1_accuracy_metrics.update_state(labels, tf.argmax(outputs, axis=1))
+    label_top_5_accuracy_metrics.update_state(labels, outputs)
 
 
 def _float_metric_value(metric):
-  """Gets the value of a float-value keras metric."""
-  return metric.result().numpy().astype(float)
+    """Gets the value of a float-value keras metric."""
+    return metric.result().numpy().astype(float)
 
 
 def log_and_write_metrics_to_summary(all_metrics, global_step):
-  for metric in all_metrics:
-    metric_value = _float_metric_value(metric)
-    logging.info('Step: [%d] %s = %f', global_step, metric.name, metric_value)
-    tf.summary.scalar(metric.name, metric_value, step=global_step)
+    for metric in all_metrics:
+        metric_value = _float_metric_value(metric)
+        logging.info("Step: [%d] %s = %f", global_step, metric.name, metric_value)
+        tf.summary.scalar(metric.name, metric_value, step=global_step)
