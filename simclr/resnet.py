@@ -26,6 +26,7 @@ import tensorflow.compat.v2 as tf
 
 FLAGS = flags.FLAGS
 BATCH_NORM_EPSILON = 1e-5
+SE_RATIO = 0.  # if it is bigger than 0, will enable SE
 
 
 class BatchNormRelu(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
@@ -36,6 +37,8 @@ class BatchNormRelu(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
                center=True,
                scale=True,
                data_format='channels_last',
+               global_bn=True,  # agg BN statistics over distributed cores
+               batch_norm_decay=0.9,
                **kwargs):
     super(BatchNormRelu, self).__init__(**kwargs)
     self.relu = relu
@@ -47,13 +50,13 @@ class BatchNormRelu(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
       axis = 1
     else:
       axis = -1
-    if FLAGS.global_bn:
+    if global_bn:
       # TODO(srbs): Set fused=True
       # Batch normalization layers with fused=True only support 4D input
       # tensors.
       self.bn = tf.keras.layers.experimental.SyncBatchNormalization(
           axis=axis,
-          momentum=FLAGS.batch_norm_decay,
+          momentum=batch_norm_decay,
           epsilon=BATCH_NORM_EPSILON,
           center=center,
           scale=scale,
@@ -64,7 +67,7 @@ class BatchNormRelu(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
       # tensors.
       self.bn = tf.keras.layers.BatchNormalization(
           axis=axis,
-          momentum=FLAGS.batch_norm_decay,
+          momentum=batch_norm_decay,
           epsilon=BATCH_NORM_EPSILON,
           center=center,
           scale=scale,
@@ -280,11 +283,11 @@ class SK_Conv2D(tf.keras.layers.Layer):  # pylint: disable=invalid-name
 class SE_Layer(tf.keras.layers.Layer):  # pylint: disable=invalid-name
   """Squeeze and Excitation layer (https://arxiv.org/abs/1709.01507)."""
 
-  def __init__(self, filters, se_ratio, data_format='channels_last', **kwargs):
+  def __init__(self, filters, data_format='channels_last', **kwargs):
     super(SE_Layer, self).__init__(**kwargs)
     self.data_format = data_format
     self.se_reduce = tf.keras.layers.Conv2D(
-        max(1, int(filters * se_ratio)),
+        max(1, int(filters * SE_RATIO)),
         kernel_size=[1, 1],
         strides=[1, 1],
         kernel_initializer=tf.keras.initializers.VarianceScaling(),
@@ -316,6 +319,7 @@ class ResidualBlock(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
   def __init__(self,
                filters,
                strides,
+               sk_ratio,
                use_projection=False,
                data_format='channels_last',
                dropblock_keep_prob=None,
@@ -327,7 +331,7 @@ class ResidualBlock(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
     self.conv2d_bn_layers = []
     self.shortcut_layers = []
     if use_projection:
-      if FLAGS.sk_ratio > 0:  # Use ResNet-D (https://arxiv.org/abs/1812.01187)
+      if sk_ratio > 0:  # Use ResNet-D (https://arxiv.org/abs/1812.01187)
         if strides > 1:
           self.shortcut_layers.append(FixedPadding(2, data_format))
         self.shortcut_layers.append(
@@ -364,8 +368,8 @@ class ResidualBlock(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
             filters=filters, kernel_size=3, strides=1, data_format=data_format))
     self.conv2d_bn_layers.append(
         BatchNormRelu(relu=False, init_zero=True, data_format=data_format))
-    if FLAGS.se_ratio > 0:
-      self.se_layer = SE_Layer(filters, FLAGS.se_ratio, data_format=data_format)
+    if SE_RATIO > 0:
+      self.se_layer = SE_Layer(filters, SE_RATIO, data_format=data_format)
 
   def call(self, inputs, training):
     shortcut = inputs
@@ -376,7 +380,7 @@ class ResidualBlock(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
     for layer in self.conv2d_bn_layers:
       inputs = layer(inputs, training=training)
 
-    if FLAGS.se_ratio > 0:
+    if SE_RATIO > 0:
       inputs = self.se_layer(inputs, training=training)
 
     return tf.nn.relu(inputs + shortcut)
@@ -388,6 +392,7 @@ class BottleneckBlock(tf.keras.layers.Layer):
   def __init__(self,
                filters,
                strides,
+               sk_ratio,
                use_projection=False,
                data_format='channels_last',
                dropblock_keep_prob=None,
@@ -397,7 +402,7 @@ class BottleneckBlock(tf.keras.layers.Layer):
     self.projection_layers = []
     if use_projection:
       filters_out = 4 * filters
-      if FLAGS.sk_ratio > 0:  # Use ResNet-D (https://arxiv.org/abs/1812.01187)
+      if sk_ratio > 0:  # Use ResNet-D (https://arxiv.org/abs/1812.01187)
         if strides > 1:
           self.projection_layers.append(FixedPadding(2, data_format))
         self.projection_layers.append(
@@ -439,9 +444,9 @@ class BottleneckBlock(tf.keras.layers.Layer):
             keep_prob=dropblock_keep_prob,
             dropblock_size=dropblock_size))
 
-    if FLAGS.sk_ratio > 0:
+    if sk_ratio > 0:
       self.conv_relu_dropblock_layers.append(
-          SK_Conv2D(filters, strides, FLAGS.sk_ratio, data_format=data_format))
+          SK_Conv2D(filters, strides, sk_ratio, data_format=data_format))
     else:
       self.conv_relu_dropblock_layers.append(
           Conv2dFixedPadding(
@@ -471,9 +476,9 @@ class BottleneckBlock(tf.keras.layers.Layer):
             keep_prob=dropblock_keep_prob,
             dropblock_size=dropblock_size))
 
-    if FLAGS.se_ratio > 0:
+    if SE_RATIO > 0:
       self.conv_relu_dropblock_layers.append(
-          SE_Layer(filters, FLAGS.se_ratio, data_format=data_format))
+          SE_Layer(filters, SE_RATIO, data_format=data_format))
 
   def call(self, inputs, training):
     shortcut = inputs
@@ -494,6 +499,7 @@ class BlockGroup(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
                block_fn,
                blocks,
                strides,
+               sk_ratio,
                data_format='channels_last',
                dropblock_keep_prob=None,
                dropblock_size=None,
@@ -506,6 +512,7 @@ class BlockGroup(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
         block_fn(
             filters,
             strides,
+            sk_ratio,
             use_projection=True,
             data_format=data_format,
             dropblock_keep_prob=dropblock_keep_prob,
@@ -516,6 +523,7 @@ class BlockGroup(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
           block_fn(
               filters,
               1,
+              sk_ratio,
               data_format=data_format,
               dropblock_keep_prob=dropblock_keep_prob,
               dropblock_size=dropblock_size))
@@ -532,12 +540,17 @@ class Resnet(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
                block_fn,
                layers,
                width_multiplier,
+               train_mode='finetune',
+               fine_tune_after_block=-1,
                cifar_stem=False,
+               sk_ratio=0.,
                data_format='channels_last',
                dropblock_keep_probs=None,
                dropblock_size=None,
                **kwargs):
     super(Resnet, self).__init__(**kwargs)
+    self.train_mode = train_mode
+    self.fine_tune_after_block = fine_tune_after_block
     self.data_format = data_format
     if dropblock_keep_probs is None:
       dropblock_keep_probs = [None] * 4
@@ -546,7 +559,7 @@ class Resnet(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
       raise ValueError('dropblock_keep_probs is not valid:',
                        dropblock_keep_probs)
     trainable = (
-        FLAGS.train_mode != 'finetune' or FLAGS.fine_tune_after_block == -1)
+        self.train_mode != 'finetune' or self.fine_tune_after_block == -1)
     self.initial_conv_relu_max_pool = []
     if cifar_stem:
       self.initial_conv_relu_max_pool.append(
@@ -563,7 +576,7 @@ class Resnet(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
       self.initial_conv_relu_max_pool.append(
           IdentityLayer(name='initial_max_pool', trainable=trainable))
     else:
-      if FLAGS.sk_ratio > 0:  # Use ResNet-D (https://arxiv.org/abs/1812.01187)
+      if sk_ratio > 0:  # Use ResNet-D (https://arxiv.org/abs/1812.01187)
         self.initial_conv_relu_max_pool.append(
             Conv2dFixedPadding(
                 filters=64 * width_multiplier // 2,
@@ -616,7 +629,7 @@ class Resnet(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
     # TODO(srbs): This impl is different from the original one in the case where
     # fine_tune_after_block != 4. In that case earlier BN stats were getting
     # updated. Now they will not be. Check with Ting to make sure this is ok.
-    if FLAGS.train_mode == 'finetune' and FLAGS.fine_tune_after_block == 0:
+    if self.train_mode == 'finetune' and self.fine_tune_after_block == 0:
       trainable = True
 
     self.block_groups.append(
@@ -625,13 +638,14 @@ class Resnet(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
             block_fn=block_fn,
             blocks=layers[0],
             strides=1,
+            sk_ratio=sk_ratio,
             name='block_group1',
             data_format=data_format,
             dropblock_keep_prob=dropblock_keep_probs[0],
             dropblock_size=dropblock_size,
             trainable=trainable))
 
-    if FLAGS.train_mode == 'finetune' and FLAGS.fine_tune_after_block == 1:
+    if self.train_mode == 'finetune' and self.fine_tune_after_block == 1:
       trainable = True
 
     self.block_groups.append(
@@ -640,13 +654,14 @@ class Resnet(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
             block_fn=block_fn,
             blocks=layers[1],
             strides=2,
+            sk_ratio=sk_ratio,
             name='block_group2',
             data_format=data_format,
             dropblock_keep_prob=dropblock_keep_probs[1],
             dropblock_size=dropblock_size,
             trainable=trainable))
 
-    if FLAGS.train_mode == 'finetune' and FLAGS.fine_tune_after_block == 2:
+    if self.train_mode == 'finetune' and self.fine_tune_after_block == 2:
       trainable = True
 
     self.block_groups.append(
@@ -655,13 +670,14 @@ class Resnet(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
             block_fn=block_fn,
             blocks=layers[2],
             strides=2,
+            sk_ratio=sk_ratio,
             name='block_group3',
             data_format=data_format,
             dropblock_keep_prob=dropblock_keep_probs[2],
             dropblock_size=dropblock_size,
             trainable=trainable))
 
-    if FLAGS.train_mode == 'finetune' and FLAGS.fine_tune_after_block == 3:
+    if self.train_mode == 'finetune' and self.fine_tune_after_block == 3:
       trainable = True
 
     self.block_groups.append(
@@ -670,13 +686,14 @@ class Resnet(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
             block_fn=block_fn,
             blocks=layers[3],
             strides=2,
+            sk_ratio=sk_ratio,
             name='block_group4',
             data_format=data_format,
             dropblock_keep_prob=dropblock_keep_probs[3],
             dropblock_size=dropblock_size,
             trainable=trainable))
 
-    if FLAGS.train_mode == 'finetune' and FLAGS.fine_tune_after_block == 4:
+    if self.train_mode == 'finetune' and self.fine_tune_after_block == 4:
       # This case doesn't really matter.
       trainable = True
 
@@ -685,10 +702,10 @@ class Resnet(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
       inputs = layer(inputs, training=training)
 
     for i, layer in enumerate(self.block_groups):
-      if FLAGS.train_mode == 'finetune' and FLAGS.fine_tune_after_block == i:
+      if self.train_mode == 'finetune' and self.fine_tune_after_block == i:
         inputs = tf.stop_gradient(inputs)
       inputs = layer(inputs, training=training)
-    if FLAGS.train_mode == 'finetune' and FLAGS.fine_tune_after_block == 4:
+    if self.train_mode == 'finetune' and self.fine_tune_after_block == 4:
       inputs = tf.stop_gradient(inputs)
     if self.data_format == 'channels_last':
       inputs = tf.reduce_mean(inputs, [1, 2])
@@ -701,7 +718,10 @@ class Resnet(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
 
 def resnet(resnet_depth,
            width_multiplier,
+           train_mode='finetune',
+           fine_tune_after_block=-1,
            cifar_stem=False,
+           sk_ratio=0.,
            data_format='channels_last',
            dropblock_keep_probs=None,
            dropblock_size=None):
@@ -741,7 +761,10 @@ def resnet(resnet_depth,
       params['block'],
       params['layers'],
       width_multiplier,
+      train_mode,
+      fine_tune_after_block,
       cifar_stem=cifar_stem,
+      sk_ratio=sk_ratio,
       dropblock_keep_probs=dropblock_keep_probs,
       dropblock_size=dropblock_size,
       data_format=data_format)
