@@ -330,14 +330,15 @@ if __name__ == "__main__":
     with strategy.scope():
 
         # Build LR schedule and optimizer.
-        learning_rate = model_lib.WarmUpAndCosineDecay(
-            args.learning_rate,
-            num_files,
-            args.warmup_epochs,
-            args.epochs,
-            args.batch_size,
-            args.learning_rate_scaling,
-        )
+        # learning_rate = model_lib.WarmUpAndCosineDecay(
+        #     args.learning_rate,
+        #     num_files,
+        #     args.warmup_epochs,
+        #     args.epochs,
+        #     args.batch_size,
+        #     args.learning_rate_scaling,
+        # )
+        learning_rate = args.learning_rate
         optimizer = model_lib.build_optimizer(
             learning_rate, args.optimizer, args.momentum
         )
