@@ -53,6 +53,7 @@ def get_files_and_labels(
                 file = os.path.join(folder, file)
             all_files.append(file)
             labels.append(int(file_label[1].strip()))
+        idx_mapping = None
     else:
         path = os.path.join(os.path.abspath(folder), "**", f"**.{ext}")
         all_files = glob(path, recursive=True)
@@ -60,10 +61,13 @@ def get_files_and_labels(
         assert len(all_files) > 0, f"Couldn't find any files in {path}"
 
         if mapping is None:
-            mapping, idx_mapping = infer_classes_from_filepaths(all_files)
+            #file_mapping --> file: class_index
+            # idx_mapping --> class: index
+            file_mapping, idx_mapping = infer_classes_from_filepaths(all_files)
+            mapping = idx_mapping
 
-        labels = [mapping[f] for f in all_files]
-    return list(zip(all_files, labels)), len(all_files), len(set(labels)), idx_mapping
+        labels = [file_mapping[f] for f in all_files]
+    return list(zip(all_files, labels)), len(all_files), len(set(labels)), mapping
 
 
 def get_pct_split(percent: int, X, y, total_sample_count: int, seed: int = 123):

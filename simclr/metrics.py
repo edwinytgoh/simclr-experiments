@@ -68,7 +68,7 @@ def update_finetune_metrics_eval(
 ):
     # labels must NOT be one-hot encoded; otherwise do argmax on labels too
     label_top_1_accuracy_metrics.update_state(labels, tf.argmax(outputs, axis=1))
-    label_top_5_accuracy_metrics.update_state(labels, outputs)
+    label_top_5_accuracy_metrics.update_state(tf.one_hot(labels, outputs.shape[-1]), outputs)
 
 
 def _float_metric_value(metric):
