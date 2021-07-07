@@ -776,6 +776,17 @@ class Resnet(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
             # This case doesn't really matter.
             trainable = True
 
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({
+            "train_mode": self.train_mode,
+            "fine_tune_after_block": self.fine_tune_after_block,
+            "data_format": self.data_format,
+            "block_groups": self.block_groups,
+            "initial_conv_relu_max_pool": self.initial_conv_relu_max_pool
+        })
+        return config
+
     def call(self, inputs, training):
         for layer in self.initial_conv_relu_max_pool:
             inputs = layer(inputs, training=training)

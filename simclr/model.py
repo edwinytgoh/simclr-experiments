@@ -228,6 +228,16 @@ class ProjectionHead(tf.keras.layers.Layer):
             raise ValueError("Unknown head projection mode {}".format(head_mode))
         super(ProjectionHead, self).__init__(**kwargs)
 
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({
+            "out_dim": self.out_dim,
+            "num_layers": self.num_layers,
+            "ft_proj_selector": self.ft_proj_selector,
+            "head_mode": self.head_mode
+        })
+        return config
+
     def call(self, inputs, training):
         if self.head_mode == "none":
             return inputs  # directly use the output hiddens as hiddens
@@ -255,6 +265,13 @@ class SupervisedHead(tf.keras.layers.Layer):
     def __init__(self, num_classes, name="head_supervised", **kwargs):
         super(SupervisedHead, self).__init__(name=name, **kwargs)
         self.linear_layer = LinearLayer(num_classes)
+
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({
+            "num_classes": self.linear_layer
+        })
+        return config
 
     def call(self, inputs, training):
         inputs = self.linear_layer(inputs, training)
@@ -327,6 +344,20 @@ class Model(tf.keras.models.Model):
         #     )
 
         # self.weight_decay_metric
+
+    def get_config(self):
+        config = super().get_config().copy()
+        config.update({
+            "num_classes": self.num_classes,
+            "image_size": self.image_size,
+            "train_mode": self.train_mode,
+            "fine_tune_after_block": self.fine_tune_after_block,
+            "linear_eval_while_pretraining": self.linear_eval_while_pretraining,
+            "optimizer_name": self.optimizer_name,
+            "weight_decay": self.weight_decay,
+            "resnet_model": self.resnet_model,
+            "_projection_head": self._projection_head,
+        })
 
     def call(self, inputs, training=False):
         features = inputs
