@@ -21,6 +21,12 @@ data_args.add_argument(
     help="Directory in which to recursively search for images/metadata",
 )
 data_args.add_argument(
+    "--dataset",
+    default="",
+    type=str,
+    help="Name of the current dataset; used for tensorboard and checkpointing",
+)
+data_args.add_argument(
     "--file_list",
     type=str,
     default=None,
@@ -33,10 +39,8 @@ data_args.add_argument(
     help="CSV file that maps int labels to class names, e.g., 0, Arm cover\n1, Other rover part",
 )
 data_args.add_argument(
-    "--ext",
-    type=str,
-    default="jpg",
-    help="Extension of the images in data_dir")
+    "--ext", type=str, default="jpg", help="Extension of the images in data_dir"
+)
 data_args.add_argument(
     "--image_size",
     type=int,
@@ -51,13 +55,18 @@ data_args.add_argument(
 )
 
 train_args = parser.add_argument_group("Training params")
-train_args.add_argument(
-    "--batch_size",
-    type=int,
-    default=32,
-    help="Batch size")
+train_args.add_argument("--batch_size", type=int, default=256, help="Batch size")
 train_args.add_argument(
     "--epochs", type=int, default=30, help="Number of epochs to train for"
+)
+train_args.add_argument(
+    "--checkpoint",
+    type=str,
+    default=None,
+    help="Folder containing a .pb file from which a checkpoint can be restored.",
+)
+train_args.add_argument(
+    "--model_dir", type=str, default=None, help="Model directory for training"
 )
 train_args.add_argument(
     "--checkpoint_epochs",
@@ -66,47 +75,91 @@ train_args.add_argument(
     help="Number of epochs between checkpoints/summaries",
 )
 train_args.add_argument(
+    "--keep_checkpoint_max",
+    type=int,
+    default=5,
+    help="Maximum number of checkpoints to keep.",
+)
+train_args.add_argument(
     "--gpu_ids",
     type=int,
     nargs="+",
     default=[],
-    help="List of GPU IDs to use in parallel")
+    help="List of GPU IDs to use in parallel",
+)
+train_args.add_argument("--resnet_depth", type=int, default=50, help="Resnet depth")
 train_args.add_argument(
-    "--resnet_depth", type=int, default=50, help="Resnet depth"
+    "--width_multiplier", type=int, default=2, help="Multiplier for resnet width"
+)
+train_args.add_argument(
+    "--sk_ratio",
+    type=float,
+    default=0.0625,
+    help="Enable selective kernels if > 0; recommendation: 0.0625",
+)
+train_args.add_argument(
+    "--proj_out_dim", type=int, default=128, help="Number of head projection dimension"
+)
+train_args.add_argument(
+    "--num_proj_layers",
+    type=int,
+    default=3,
+    help="Number of nonlinear head layers after resnet",
+)
+train_args.add_argument(
+    "--ft_proj_selector",
+    type=int,
+    default=0,
+    help=(
+        "Which layer of the proj head to use during finetuning. "
+        "0 means no projection head, and -1 means the final layer."
+        "The SimCLR v2 paper used 0 when finetuning with all labels, 1 when finetuning from 1 and 10 percent."
+    ),
 )
 train_args.add_argument(
     "--optimizer",
     type=str,
     default="lars",
-    help="Optimizer to use. Choices: ['adam', 'lars', 'SGD']")
+    help="Optimizer to use. Choices: ['adam', 'lars', 'SGD']",
+)
 train_args.add_argument(
     "--learning_rate",
     type=float,
     default=0.3,
-    help="Initial lr per batch size of 256")
+    help="Initial learning rate per batch size of 256 (0.02 * sqrt(256))",
+)
 train_args.add_argument(
     "--learning_rate_scaling",
     type=str,
-    default='linear',
-    help='How to scale the learning rate as a function of batch size. Can be `linear` or `sqrt`')
+    default="linear",
+    help="How to scale the learning rate as a function of batch size. Can be `linear` or `sqrt`",
+)
 train_args.add_argument(
-    "--warmup_epochs", type=int, default=5, help="Number of epochs of warmup"
+    "--warmup_epochs", type=int, default=0, help="Number of epochs of warmup"
 )
 train_args.add_argument(
     "--momentum",
     type=float,
     default=0.9,
-    help="Momentum param for lars and SGD optimizers")
+    help="Momentum param for lars and SGD optimizers",
+)
 train_args.add_argument(
-    "--weight_decay",
-    type=float,
-    default=1e-6,
-    help='Amount of weight decay to use')
+    "--weight_decay", type=float, default=0.0, help="Amount of weight decay to use"
+)
+train_args.add_argument(
+    "--fine_tune_after_block",
+    type=int,
+    default=-1,
+    help=(
+        "The layers after which block that we will fine-tune. -1 means fine-tuning "
+        "everything. 0 means fine-tuning after stem block. 4 means fine-tuning "
+        "just the linear head."
+    ),
+)
 
 train_args.add_argument(
-    "--run_eagerly",
-    action='store_true',
-    help="Set eager tracing to true for debugging")
+    "--run_eagerly", action="store_true", help="Set eager tracing to true for debugging"
+)
 
 # def try_restore_from_checkpoint(model, global_step, optimizer):
 #   """Restores the latest ckpt if it exists, otherwise check FLAGS.checkpoint."""
@@ -149,6 +202,10 @@ if __name__ == "__main__":
     """
 
     args = parser.parse_args()
+
+    print(f"Argparse parsed the following command-line arguments:\n")
+    pprint(vars(args), indent=2, compact=True)
+
     image_size = args.image_size
 
     if args.file_list is not None:
@@ -235,17 +292,18 @@ if __name__ == "__main__":
             optimizer_name=args.optimizer,
             weight_decay=args.weight_decay,
             resnet_depth=args.resnet_depth,
-            sk_ratio=0.0,
-            width_multiplier=1,
-            proj_out_dim=128,
-            num_proj_layers=3,
-            ft_proj_selector=0,
-            head_mode="linear",
-            use_bias=False,  # whether to use bias in projection head
+            sk_ratio=args.sk_ratio,
+            width_multiplier=args.width_multiplier,
+            proj_out_dim=args.proj_out_dim,
+            num_proj_layers=args.num_proj_layers,
+            ft_proj_selector=args.ft_proj_selector,
+            head_mode="nonlinear",
             use_bn=True,  # whether to use batch norm in projection head
-            finetune_after_block=-1,
+            fine_tune_after_block=args.fine_tune_after_block,
             linear_eval_while_pretraining=False,
         )
+        model.build((None, args.image_size, args.image_size, 3))
+        print(model.summary())
 
         model.compile(
             loss=obj_lib.add_supervised_loss,

@@ -186,7 +186,6 @@ class ProjectionHead(tf.keras.layers.Layer):
         num_layers,
         ft_proj_selector,
         head_mode,
-        use_bias,
         use_bn,
         **kwargs,
     ):
@@ -200,7 +199,7 @@ class ProjectionHead(tf.keras.layers.Layer):
         elif self.head_mode == "linear":
             self.linear_layers = [
                 LinearLayer(
-                    num_classes=out_dim, use_bias=use_bias, use_bn=use_bn, name="l_0"
+                    num_classes=out_dim, use_bias=False, use_bn=use_bn, name="l_0"
                 )
             ]
         elif self.head_mode == "nonlinear":
@@ -280,9 +279,8 @@ class Model(tf.keras.models.Model):
         num_proj_layers=3,
         ft_proj_selector=0,
         head_mode="linear",
-        use_bias=False,  # whether to use bias in projection head
         use_bn=True,  # whether to use batch norm in projection head
-        finetune_after_block=-1,
+        fine_tune_after_block=-1,
         linear_eval_while_pretraining=False,
         **kwargs,
     ):
@@ -290,7 +288,7 @@ class Model(tf.keras.models.Model):
         self.num_classes = num_classes
         self.image_size = image_size
         self.train_mode = train_mode
-        self.finetune_after_block = finetune_after_block
+        self.fine_tune_after_block = fine_tune_after_block
         self.linear_eval_while_pretraining = linear_eval_while_pretraining
         self.optimizer_name = optimizer_name
         self.weight_decay = weight_decay
@@ -299,6 +297,8 @@ class Model(tf.keras.models.Model):
             self.resnet_model = resnet.resnet(
                 resnet_depth=resnet_depth,
                 width_multiplier=width_multiplier,
+                train_mode=train_mode,
+                fine_tune_after_block=fine_tune_after_block,
                 cifar_stem=image_size <= 32,
                 sk_ratio=sk_ratio,
             )
@@ -307,7 +307,6 @@ class Model(tf.keras.models.Model):
                 num_proj_layers,
                 ft_proj_selector,
                 head_mode,
-                use_bias,
                 use_bn,
             )
             if train_mode == "finetune":
