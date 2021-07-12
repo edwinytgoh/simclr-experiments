@@ -9,7 +9,6 @@ from collections import defaultdict
 
 import numpy as np
 import pandas as pd
-import splitfolders
 import sklearn.model_selection
 import tensorflow as tf
 
@@ -191,7 +190,3 @@ def describe_folder(
     )
 
     return num_files, num_classes, avg_class_example_count, dict(class_count)
-
-
-def train_test_split(ratio: Tuple, input_folder: str, output_folder: str, seed: int):
-    splitfolders.ratio(input_folder, output_folder, seed=seed, ratio=ratio)
