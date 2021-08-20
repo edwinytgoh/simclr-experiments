@@ -16,16 +16,14 @@
 """Model specification for SimCLR."""
 
 import math
-from absl import flags
 
 import data_util
 import lars_optimizer
+import metrics
+import objective as obj_lib
 import resnet
 import tensorflow as tf
-
-import objective as obj_lib
-import metrics
-
+from absl import flags
 
 FLAGS = flags.FLAGS
 
@@ -186,7 +184,6 @@ class ProjectionHead(tf.keras.layers.Layer):
         num_layers,
         ft_proj_selector,
         head_mode,
-        use_bn,
         **kwargs,
     ):
         self.out_dim = out_dim
@@ -199,7 +196,7 @@ class ProjectionHead(tf.keras.layers.Layer):
         elif self.head_mode == "linear":
             self.linear_layers = [
                 LinearLayer(
-                    num_classes=out_dim, use_bias=False, use_bn=use_bn, name="l_0"
+                    num_classes=out_dim, use_bias=False, use_bn=True, name="l_0"
                 )
             ]
         elif self.head_mode == "nonlinear":
@@ -288,20 +285,22 @@ class Model(tf.keras.models.Model):
         image_size,
         train_mode,
         optimizer_name,
-        weight_decay,
+        weight_decay=0,
         resnet_depth=50,
         sk_ratio=0.0,
         width_multiplier=1,
         proj_out_dim=128,
         num_proj_layers=3,
         ft_proj_selector=0,
-        head_mode="linear",
-        use_bn=True,  # whether to use batch norm in projection head
+        head_mode="nonlinear",
         fine_tune_after_block=-1,
         linear_eval_while_pretraining=False,
+        weighted_loss=False,
         **kwargs,
     ):
         super(Model, self).__init__(**kwargs)
+
+        ## keep track of all kwargs
         self.num_classes = num_classes
         self.image_size = image_size
         self.train_mode = train_mode
@@ -309,6 +308,16 @@ class Model(tf.keras.models.Model):
         self.linear_eval_while_pretraining = linear_eval_while_pretraining
         self.optimizer_name = optimizer_name
         self.weight_decay = weight_decay
+        self.resnet_depth = resnet_depth
+        self.sk_ratio = sk_ratio
+        self.width_multiplier = width_multiplier
+        self.proj_out_dim = proj_out_dim
+        self.num_proj_layers = num_proj_layers
+        self.ft_proj_selector = ft_proj_selector
+        self.head_mode = head_mode
+        self.fine_tune_after_block = fine_tune_after_block
+        self.linear_eval_while_pretraining = linear_eval_while_pretraining
+        self.weighted_loss = weighted_loss
         # Main model consists of resnet, proj head (and linear head if finetuning)
         with self.distribute_strategy.scope():
             self.resnet_model = resnet.resnet(
@@ -324,7 +333,6 @@ class Model(tf.keras.models.Model):
                 num_proj_layers,
                 ft_proj_selector,
                 head_mode,
-                use_bn,
             )
             if train_mode == "finetune":
                 self.supervised_head = SupervisedHead(num_classes)
@@ -346,18 +354,28 @@ class Model(tf.keras.models.Model):
         # self.weight_decay_metric
 
     def get_config(self):
-        config = super().get_config().copy()
-        config.update({
-            "num_classes": self.num_classes,
-            "image_size": self.image_size,
-            "train_mode": self.train_mode,
-            "fine_tune_after_block": self.fine_tune_after_block,
-            "linear_eval_while_pretraining": self.linear_eval_while_pretraining,
-            "optimizer_name": self.optimizer_name,
-            "weight_decay": self.weight_decay,
-            "resnet_model": self.resnet_model,
-            "_projection_head": self._projection_head,
-        })
+        config = {}
+        config.update(
+            {
+                "num_classes": self.num_classes,
+                "image_size": self.image_size,
+                "train_mode": self.train_mode,
+                "fine_tune_after_block": self.fine_tune_after_block,
+                "linear_eval_while_pretraining": self.linear_eval_while_pretraining,
+                "optimizer_name": self.optimizer_name,
+                "weight_decay": self.weight_decay,
+                "resnet_depth": self.resnet_depth,
+                "sk_ratio": self.sk_ratio,
+                "width_multiplier": self.width_multiplier,
+                "proj_out_dim": self.proj_out_dim,
+                "num_proj_layers": self.num_proj_layers,
+                "ft_proj_selector": self.ft_proj_selector,
+                "head_mode": self.head_mode,
+                "fine_tune_after_block": self.fine_tune_after_block,
+                "linear_eval_while_pretraining": self.linear_eval_while_pretraining,
+            }
+        )
+        return config
 
     def call(self, inputs, training=False):
         features = inputs
@@ -385,8 +403,14 @@ class Model(tf.keras.models.Model):
             return projection_head_outputs, None
 
     def train_step(self, img_labels):
-        img = img_labels[0]
-        labels = img_labels[1]
+        if not self.weighted_loss:
+            #! THere is a bug here
+            img = img_labels[0]
+            labels = img_labels[1]
+            weights = None
+        else:
+            img, labels = img_labels[0]
+            weights = img_labels[1]
         strategy = self.distribute_strategy
         with tf.GradientTape() as tape:
             projection_outputs, supervised_outputs = self(img, training=True)
@@ -411,7 +435,11 @@ class Model(tf.keras.models.Model):
                 # )
             if supervised_outputs is not None:  # will call this block in finetuning
                 logits = supervised_outputs
+                # compiled_loss = sparse categorical x-entropy w/ logits
                 sup_loss = self.compiled_loss(tf.squeeze(labels), logits)
+                if self.weighted_loss:
+                    weighted_loss = sup_loss * weights
+                    sup_loss = tf.reduce_mean(weighted_loss)
                 # l = labels
                 # if (
                 #     FLAGS.train_mode == "pretrain"
@@ -450,6 +478,7 @@ class Model(tf.keras.models.Model):
             # replicas so we divide the loss by the number of replicas so that the
             # mean gradient is applied.
             loss = loss / strategy.num_replicas_in_sync
+            loss = tf.cast(loss, tf.float32)
         grads = tape.gradient(loss, self.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
         return {m.name: m.result() for m in self.metrics}
