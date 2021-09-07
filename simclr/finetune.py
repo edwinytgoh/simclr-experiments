@@ -171,10 +171,10 @@ def try_restore_from_checkpoint(
     model,
     model_dir,
     keep_checkpoint_max,
-    checkpoint,  # e.g., '/home/goh/Documents/D3M/simclr_tf2_models/pretrained/r50_2x_sk0/saved_model/'
     global_step,
     optimizer,
-    zero_init_logits_layer,
+    checkpoint=None,  # e.g., '/home/goh/Documents/D3M/simclr_tf2_models/pretrained/r50_2x_sk0/saved_model/'
+    zero_init_logits_layer=False,
 ):
     """Restores the latest ckpt if it exists, otherwise check FLAGS.checkpoint."""
     ckpt = tf.train.Checkpoint(
@@ -186,7 +186,7 @@ def try_restore_from_checkpoint(
     latest_ckpt = checkpoint_manager.latest_checkpoint
     if latest_ckpt:
         # Restore model weights, global step, optimizer states
-        print("Restoring from latest checkpoint: %s", latest_ckpt)
+        print("Restoring from latest checkpoint: ", latest_ckpt)
         checkpoint_manager.checkpoint.restore(latest_ckpt).expect_partial()
     elif checkpoint:
         # Restore model weights only, but not global step and optimizer states
@@ -214,26 +214,7 @@ def try_restore_from_checkpoint(
                 temp_model = tf.keras.models.load_model(checkpoint)
                 h5_file = os.path.join(checkpoint, "model_weights.h5")
                 temp_model.model.save_weights(h5_file)
-                time.sleep(2)
                 model.load_weights(h5_file, by_name=True, skip_mismatch=True)
-
-        # print("Restoring from given checkpoint: %s", checkpoint)
-        # checkpoint_manager2 = tf.train.CheckpointManager(
-        #     tf.train.Checkpoint(model=model),
-        #     directory=model_dir,
-        #     max_to_keep=keep_checkpoint_max,
-        # )
-        # checkpoint_manager2.checkpoint.restore(checkpoint).expect_partial()
-        # if zero_init_logits_layer:
-        #     model = checkpoint_manager2.checkpoint.model
-        #     output_layer_parameters = model.supervised_head.trainable_weights
-        #     print(
-        #         "Initializing output layer parameters %s to zero",
-        #         [x.op.name for x in output_layer_parameters],
-        #     )
-        #     for x in output_layer_parameters:
-        #         x.assign(tf.zeros_like(x))
-
     return checkpoint_manager
 
 

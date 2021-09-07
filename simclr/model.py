@@ -17,7 +17,6 @@
 
 import math
 
-import data_util
 import lars_optimizer
 import metrics
 import objective as obj_lib
