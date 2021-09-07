@@ -32,6 +32,17 @@ def add_supervised_loss(labels, logits):
     return tf.reduce_mean(losses)
 
 
+def add_weighted_supervised_loss(global_batch_size):
+  def loss(labels, logits):
+    # https://www.tensorflow.org/guide/keras/train_and_evaluate#handling_losses_and_metrics_that_dont_fit_the_standard_signature
+    losses = tf.keras.losses.SparseCategoricalCrossentropy(
+        from_logits=True, reduction=tf.keras.losses.Reduction.NONE
+    )(labels, logits)
+    return losses
+    # weighted_loss = losses * weights
+    # return tf.nn.compute_average_loss(weighted_loss, global_batch_size=global_batch_size)
+  return loss
+
 def add_contrastive_loss(hidden, hidden_norm=True, temperature=1.0, strategy=None):
     """Compute loss for model.
 

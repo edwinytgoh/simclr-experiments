@@ -1,16 +1,18 @@
-from functools import partial
-import os
-import sys
 import csv
+import os
 import shutil
+import sys
+from collections import defaultdict
+from functools import partial
 from glob import glob
 from typing import List, Tuple
-from collections import defaultdict
+
 
 import numpy as np
 import pandas as pd
-import sklearn.model_selection
+from tqdm import tqdm
 import tensorflow as tf
+import sklearn.model_selection
 
 FLAGS_color_jitter_strength = 0.3
 sys.path.insert(0, os.path.dirname(__file__))
@@ -112,6 +114,30 @@ def get_pct_split(percent: int, X, y, total_sample_count: int, seed: int = 123):
     return X_split
 
 
+def split_uniformly_across_classes(X, seed=123):
+    labels = [x[1] for x in X]
+    unique_labels_sorted = sorted(set(labels))
+    class_distribution = [labels.count(i) for i in unique_labels_sorted]
+    min_samples = min(zip(unique_labels_sorted, class_distribution), key=lambda x: x[1])
+    print(
+        f"Class with minimum samples is {min_samples[0]} with {min_samples[1]} samples"
+    )
+    print(f"Will produce uniform dataset such that each class has {min_samples[1]}.")
+    print(
+        f"This dataset has {len(unique_labels_sorted)} classes, "
+        f"which will result in {len(unique_labels_sorted)*min_samples[1]} total samples."
+    )
+
+    new_X = []
+    for label in unique_labels_sorted:
+        X_subset = [x for x in X if x[1] == label]
+        random_indices = np.random.default_rng(seed).integers(
+            low=0, high=len(X_subset), size=min_samples[1]
+        )
+        new_X += [X_subset[i] for i in random_indices]
+    return new_X
+
+
 def load_jpg(filepath: str) -> Tuple[tf.Tensor]:
     """Read a JPG image into a tf.Tensor object
     """
@@ -135,7 +161,7 @@ def _preprocess(image, width=256, height=256):
     return preprocessed
 
 
-def get_tf_dataset(X, ext, preprocess=False, width=256, height=256):
+def get_tf_dataset(X, ext, preprocess=False, width=256, height=256, shuffle=True):
     files = [x[0] for x in X]
     labels = [x[1] for x in X]
     load_img = load_png if ext == "png" else load_jpg
@@ -147,7 +173,10 @@ def get_tf_dataset(X, ext, preprocess=False, width=256, height=256):
         img_ds = img_ds.map(p, num_parallel_calls=tf.data.AUTOTUNE)
     label_ds = tf.data.Dataset.from_tensor_slices(labels)
     out_ds = tf.data.Dataset.zip((img_ds, label_ds))
-    return out_ds#.shuffle(len(X), reshuffle_each_iteration=True)
+    if shuffle:
+        return out_ds.shuffle(len(X), reshuffle_each_iteration=True)
+    else:
+        return out_ds
 
 
 def describe_folder(
