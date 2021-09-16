@@ -20,9 +20,8 @@ Residual networks (ResNets) were proposed in:
     Deep Residual Learning for Image Recognition. arXiv:1512.03385
 """
 
+import tensorflow as tf
 from absl import flags
-import tensorflow.compat.v2 as tf
-
 
 FLAGS = flags.FLAGS
 BATCH_NORM_EPSILON = 1e-5
@@ -778,25 +777,53 @@ class Resnet(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
 
     def get_config(self):
         config = super().get_config().copy()
-        config.update({
-            "train_mode": self.train_mode,
-            "fine_tune_after_block": self.fine_tune_after_block,
-            "data_format": self.data_format,
-            "block_groups": self.block_groups,
-            "initial_conv_relu_max_pool": self.initial_conv_relu_max_pool
-        })
+        config.update(
+            {
+                "train_mode": self.train_mode,
+                "fine_tune_after_block": self.fine_tune_after_block,
+                "data_format": self.data_format,
+                "block_groups": self.block_groups,
+                "initial_conv_relu_max_pool": self.initial_conv_relu_max_pool,
+            }
+        )
         return config
 
-    def call(self, inputs, training):
+    def call(self, inputs, training, output_block=None):
+        """Calls this resnet model with the specified inputs
+        Also applies `tf.stop_gradient` based on
+        `fine_tune_after_block` constructor argument/instance variable.
+
+        Parameters
+        ----------
+        inputs : Tensor, dict/list/tuple of input tensors
+
+        training : bool
+            Indicates whether to run the `Network` in training mode or inference mode
+        output_block : int, optional
+            Integer from 1-4 that determines which resnet block's outputs to return, by default None
+            Useful in segmentation cases where we don't want the `final_avg_pool`
+
+        Returns
+        -------
+        Tensor
+            Output tensor from the selected block if `output_block != None`, else output from `final_avg_pool`
+        """
         for layer in self.initial_conv_relu_max_pool:
             inputs = layer(inputs, training=training)
 
+        # keep track of each resnet block's outputs so that we can choose which one to return
+        block_outputs = []
         for i, layer in enumerate(self.block_groups):
             if self.train_mode == "finetune" and self.fine_tune_after_block == i:
                 inputs = tf.stop_gradient(inputs)
             inputs = layer(inputs, training=training)
+            block_outputs.append(inputs)
         if self.train_mode == "finetune" and self.fine_tune_after_block == 4:
             inputs = tf.stop_gradient(inputs)
+
+        if output_block:
+            return block_outputs[output_block - 1]  # output_block specified from 1 - 4
+
         if self.data_format == "channels_last":
             inputs = tf.reduce_mean(inputs, [1, 2])
         else:

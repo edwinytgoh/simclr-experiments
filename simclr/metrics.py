@@ -57,7 +57,7 @@ def update_finetune_metrics_train(
 ):
     supervised_loss_metric.update_state(loss)
     # labels must NOT be one-hot encoded; otherwise do argmax on labels too
-    label_acc = tf.equal(labels, tf.cast(tf.argmax(logits, 1), dtype=tf.int32))
+    label_acc = tf.equal(labels, tf.cast(tf.argmax(logits, -1), dtype=tf.int32))
 
     label_acc = tf.reduce_mean(tf.cast(label_acc, tf.float32))
     supervised_acc_metric.update_state(label_acc)
