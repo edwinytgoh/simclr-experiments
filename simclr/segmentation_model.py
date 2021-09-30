@@ -1,15 +1,17 @@
 import functools
 import math
+import types
 
-# import data_util
-import lars_optimizer
-import metrics
-import objective as obj_lib
-import resnet
 import tensorflow as tf
 from absl import flags, logging
-from model import ProjectionHead, add_weight_decay
-from resnet import BATCH_NORM_EPSILON
+from tensorflow.python.keras.utils import losses_utils
+
+import simclr.resnet as resnet
+from simclr.model import ProjectionHead, add_weight_decay
+from simclr.resnet import BATCH_NORM_EPSILON
+
+# import data_util
+
 
 FLAGS = flags.FLAGS
 
@@ -98,118 +100,6 @@ class AtrousConv2D(tf.keras.layers.Layer):
             (image_level_features, net1, net2, net3, net4), axis=3, name="concat"
         )
         return self.bn_output(self.conv_output(net))
-
-
-def AtrousConv_BN(
-    x,
-    filters,
-    prefix,
-    stride=1,
-    kernel_size=3,
-    rate=1,
-    depth_activation=False,
-    center=True,
-    scale=True,
-    # epsilon=1e-3,
-    global_bn=True,
-    batch_norm_decay=0.9,
-):
-    """Atrous convolutional layer with BN between depthwise & pointwise. Optionally add activation after BN
-    Implements right "same" padding for even kernel sizes
-    Args:
-        x: input tensor
-        filters: num of filters in pointwise convolution
-        prefix: prefix before name
-        stride: stride at depthwise conv
-        kernel_size: kernel size for depthwise convolution
-        rate: atrous rate for depthwise convolution
-        depth_activation: flag to use activation between depthwise & poinwise convs
-        epsilon: epsilon to use in BN layer
-    Note: Taken from https://github.com/bonlime/keras-deeplab-v3-plus/blob/e32f66b21a9647dfe08f27549e3200526e959ab1/model.py#L48
-    """
-
-    bn_axis = -1  # data_format == 'channels_last'
-    gamma_initializer = tf.ones_initializer()
-    if global_bn:
-        bn_cls = functools.partial(
-            tf.keras.layers.experimental.SyncBatchNormalization,
-            axis=bn_axis,
-            momentum=batch_norm_decay,
-            epsilon=BATCH_NORM_EPSILON,
-            center=center,
-            scale=scale,
-            gamma_initializer=gamma_initializer,  # assumes init_zero == False
-        )
-    else:
-        bn_cls = functools.partial(
-            tf.keras.layers.BatchNormalization,
-            axis=bn_axis,
-            momentum=batch_norm_decay,
-            epsilon=BATCH_NORM_EPSILON,
-            center=center,
-            scale=scale,
-            fused=False,
-            gamma_initializer=gamma_initializer,
-        )
-
-    if stride == 1:
-        depth_padding = "same"
-    else:
-        kernel_size_effective = kernel_size + (kernel_size - 1) * (rate - 1)
-        pad_total = kernel_size_effective - 1
-        pad_beg = pad_total // 2
-        pad_end = pad_total - pad_beg
-        x = tf.keras.layers.ZeroPadding2D((pad_beg, pad_end))(x)
-        depth_padding = "valid"
-
-    if not depth_activation:
-        x = tf.keras.layers.Activation(tf.nn.relu)(x)
-
-    # Depthwise Conv, BN, and optional relu
-    x = tf.keras.layers.DepthwiseConv2D(
-        (kernel_size, kernel_size),
-        strides=(stride, stride),
-        dilation_rate=(rate, rate),
-        padding=depth_padding,
-        use_bias=False,
-        name=prefix + "_depthwise",
-    )(x)
-    x = bn_cls(name=prefix + "_depthwise_BN")(x)
-    if depth_activation:
-        x = tf.keras.layers.Activation(tf.nn.relu)(x)
-
-    # Atrous Conv2D
-    x = tf.keras.layers.Conv2D(
-        filters, (1, 1), padding="same", use_bias=False, name=prefix + "_pointwise"
-    )(x)
-    x = bn_cls(name=prefix + "_pointwise_BN")(x)
-    if depth_activation:
-        x = tf.keras.layers.Activation(tf.nn.relu)(x)
-
-    return x
-
-
-def AtrousConvBlock(
-    x,
-    depth=256,
-    padding="SAME",
-    use_bn=False,
-    global_bn=True,
-    batch_norm_decay=0.9,
-    depth_activation=False,
-):
-    inp = tf.keras.layers.Input(shape=x.shape)
-    output = get_aspp_logits(
-        x,
-        depth=depth,
-        padding=padding,
-        use_bn=use_bn,
-        global_bn=global_bn,
-        batch_norm_decay=batch_norm_decay,
-        depth_activation=depth_activation,
-    )
-
-    return tf.keras.models.Model(inputs=tf.keras.layers.Input(x), outputs=output)
 
 
 def build_atrous_conv_layer(
@@ -452,80 +342,108 @@ class SegModel(tf.keras.models.Model):
             output = self.atrous_block(supervised_head_inputs)
             output = tf.image.resize(output, [self.image_size, self.image_size])
             supervised_output = self.supervised_layer(output, training=training)
-            return None, supervised_output
+            return hiddens, None, supervised_output
         else:
-            return projection_head_outputs, None
+            return hiddens, projection_head_outputs, None
 
-    def train_step(self, img_labels):
-        img = img_labels[0]
-        labels = img_labels[1]
-        strategy = self.distribute_strategy
+    def train_step(self, input_dict):
+        loss = 0.0
         with tf.GradientTape() as tape:
-            projection_outputs, supervised_outputs = self(img, training=True)
-
-            loss = None
+            img = input_dict["image"]
+            hiddens, projection_outputs, supervised_outputs = self(img, training=True)
             # if projection_outputs is not None:
             #     logits = projection_outputs
-            #     con_loss, logits_con, labels_con = obj_lib.add_contrastive_loss(
-            #         logits,
-            #         hidden_norm=FLAGS.hidden_norm,
-            #         temperature=FLAGS.temperature,
-            #         strategy=strategy,
-            #     )
-            #     if loss is None:
-            #         loss = con_loss
-            #     else:
-            #         loss += con_loss
+            # con_loss, logits_con, labels_con = obj_lib.add_contrastive_loss(
+            #     logits,
+            #     hidden_norm=FLAGS.hidden_norm,
+            #     temperature=FLAGS.temperature,
+            #     strategy=strategy,
+            # )
+            # if loss is None:
+            #     loss = con_loss
+            # else:
+            #     loss += con_loss
             if supervised_outputs is not None:  # will call this block in finetuning
-                logits = supervised_outputs
-                # num_rows = tf.math.reduce_prod(tf.shape(img)[0:-1])
-                labels_reshaped = tf.reshape(labels, [-1, 1])
-                logits_reshaped = tf.reshape(logits, (-1, self.num_classes))
-                if not self.compiled_metrics._built:
-                    self.compiled_metrics.build(logits_reshaped, labels_reshaped)
-                sup_loss = self.compiled_loss(labels_reshaped, logits_reshaped)
-                # sup_loss_idx = self.metrics_names.index("supervised_loss_mean")
-                # self.metrics[sup_loss_idx].update_state(sup_loss)
-
-                # Recalculate X-entropy metric to make sure it matches with loss
-                entropy_idx = self.metrics_names.index("crossentropy_loss")
-                self.metrics[entropy_idx].update_state(labels_reshaped, logits_reshaped)
-                if loss is None:
-                    loss = sup_loss
-                else:
-                    loss += sup_loss
-                iou_idx = self.metrics_names.index("iou")
-                acc_idx = self.metrics_names.index("accuracy")
-                predictions = tf.expand_dims(
-                    tf.argmax(logits_reshaped, axis=-1), axis=-1
-                )  # n x 1
-                self.metrics[iou_idx].update_state(labels_reshaped, predictions)
-                self.metrics[acc_idx].update_state(labels_reshaped, logits_reshaped)
-
-            # weight_decay = add_weight_decay(
-            #     self, self.weight_decay, self.optimizer_name, adjust_per_optimizer=True
-            # )  # always 0 if self.weight_decay is 0
-
-            # wt_decay_idx = self.metrics_names.index("weight_decay")
-            # loss_mean_idx = self.metrics_names.index("total_loss_mean")
-            # loss_sum_idx = self.metrics_names.index("total_loss_sum")
-
-            # # update weight decay and total_loss metrics
-            # self.metrics[wt_decay_idx].update_state(weight_decay)
-            # self.metrics[loss_mean_idx].update_state(loss)
-            # self.metrics[loss_sum_idx].update_state(loss)
-
-            # The default behavior of `apply_gradients` is to sum gradients from all
-            # replicas so we divide the loss by the number of replicas so that the
-            # mean gradient is applied.
-            # print(f"\n{loss} / {strategy.num_replicas_in_sync} = {loss/strategy.num_replicas_in_sync}\n")
-            # loss = loss / strategy.num_replicas_in_sync
-
+                labels, logits = self.reshape_and_mask_labels_logits(
+                    input_dict, supervised_outputs
+                )
+                sup_loss = self.update_loss_and_metrics(labels, logits)
+                loss += sup_loss
         grads = tape.gradient(loss, self.trainable_variables)
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
         return {m.name: m.result() for m in self.metrics}
 
-    def test_step(self, img_labels):
+    def reshape_and_mask_labels_logits(self, input_dict, logits):
+        labels = input_dict["seg_mask"]
+        labels_reshaped = tf.reshape(labels, [-1, 1])
+        logits_reshaped = tf.reshape(logits, (-1, self.num_classes))
+
+        labels_reshaped, logits_reshaped = self.mask_out_labels_and_logits(
+            input_dict, labels_reshaped, logits_reshaped
+        )
+        return labels_reshaped, logits_reshaped
+
+    def mask_out_labels_and_logits(self, input_dict, labels_reshaped, logits_reshaped):
+        if "image_mask" in input_dict:
+            # mask out the labels:
+            # True if include, False if masked out
+            img_mask = input_dict["image_mask"]
+            mask_reshaped = tf.reshape(img_mask, [-1, 1])
+            labels_reshaped = tf.boolean_mask(labels_reshaped, mask_reshaped)
+            logits_reshaped = tf.reshape(
+                tf.boolean_mask(
+                    logits_reshaped, tf.tile(mask_reshaped, [1, self.num_classes])
+                ),
+                [-1, self.num_classes],
+            )
+        return labels_reshaped, logits_reshaped
+
+    def update_loss_and_metrics(self, labels_reshaped, logits_reshaped):
+        # Update loss
+        sup_loss = self.compiled_loss(labels_reshaped, logits_reshaped)
+
+        # Update metrics
+        if not self.compiled_metrics._built:
+            self.compiled_metrics.build(logits_reshaped, labels_reshaped)
+
+        # Recalculate X-entropy metric to make sure it matches with loss
+        entropy_idx = self.metrics_names.index("crossentropy_loss")
+        self.metrics[entropy_idx].update_state(labels_reshaped, logits_reshaped)
+
+        predictions = tf.expand_dims(
+            tf.argmax(logits_reshaped, axis=-1), axis=-1
+        )  # n x 1
+        predictions, labels_reshaped = losses_utils.squeeze_or_expand_dimensions(
+            predictions, labels_reshaped
+        )
+        iou_idx = self.metrics_names.index("iou")
+        acc_idx = self.metrics_names.index("accuracy")
+        self.metrics[iou_idx].update_state(labels_reshaped, predictions)
+        self.metrics[acc_idx].update_state(labels_reshaped, logits_reshaped)
+        # Updates stateful loss metrics.
+        self.compiled_loss(labels_reshaped, logits_reshaped)
+
+        # weight_decay = add_weight_decay(
+        #     self, self.weight_decay, self.optimizer_name, adjust_per_optimizer=True
+        # )  # always 0 if self.weight_decay is 0
+
+        # wt_decay_idx = self.metrics_names.index("weight_decay")
+        # loss_mean_idx = self.metrics_names.index("total_loss_mean")
+        # loss_sum_idx = self.metrics_names.index("total_loss_sum")
+
+        # # update weight decay and total_loss metrics
+        # self.metrics[wt_decay_idx].update_state(weight_decay)
+        # self.metrics[loss_mean_idx].update_state(loss)
+        # self.metrics[loss_sum_idx].update_state(loss)
+
+        # The default behavior of `apply_gradients` is to sum gradients from all
+        # replicas so we divide the loss by the number of replicas so that the
+        # mean gradient is applied.
+        # print(f"\n{loss} / {strategy.num_replicas_in_sync} = {loss/strategy.num_replicas_in_sync}\n")
+        # loss = loss / strategy.num_replicas_in_sync
+        return sup_loss
+
+    def test_step(self, input_dict):
         """The logic for one evaluation step.
 
         This method can be overridden to support custom evaluation logic.
@@ -540,43 +458,35 @@ class SegModel(tf.keras.models.Model):
         `tf.distribute.Strategy` settings), should be left to
         `Model.make_test_function`, which can also be overridden.
 
-        Args:
-            data: A nested structure of `Tensor`s.
-
-        Returns:
-            A `dict` containing values that will be passed to
-            `tf.keras.callbacks.CallbackList.on_train_batch_end`. Typically, the
-            values of the `Model`'s metrics are returned.
+        A `dict` containing values that will be passed to
+        `tf.keras.callbacks.CallbackList.on_train_batch_end`. Typically, the
+        values of the `Model`'s metrics are returned.
         """
-        img = img_labels[0]
-        labels = img_labels[1]
-        _, supervised_outputs = self(img, training=True)
-        logits = supervised_outputs
-        # num_rows = tf.math.reduce_prod(tf.shape(img)[0:-1])
-        labels_reshaped = tf.reshape(labels, [-1, 1])
-        logits_reshaped = tf.reshape(logits, (-1, self.num_classes))
-        if not self.compiled_metrics._built:
-            self.compiled_metrics.build(logits_reshaped, labels_reshaped)
-        sup_loss = self.compiled_loss(labels_reshaped, logits_reshaped)
-        # sup_loss_idx = self.metrics_names.index("supervised_loss_mean")
-        # self.metrics[sup_loss_idx].update_state(sup_loss)
+        img = input_dict["image"]
+        _, _, supervised_outputs = self(img, training=True)
+        if supervised_outputs is not None:  # will call this block in finetuning
+            labels, logits = self.reshape_and_mask_labels_logits(
+                input_dict, supervised_outputs
+            )
+            sup_loss = self.update_loss_and_metrics(labels, logits)
 
-        # Recalculate X-entropy metric to make sure it matches with loss
-        entropy_idx = self.metrics_names.index("crossentropy_loss")
-        self.metrics[entropy_idx].update_state(labels_reshaped, logits_reshaped)
-        iou_idx = self.metrics_names.index("iou")
-        acc_idx = self.metrics_names.index("accuracy")
-        predictions = tf.expand_dims(
-            tf.argmax(logits_reshaped, axis=-1), axis=-1
-        )  # n x 1
-        self.metrics[iou_idx].update_state(labels_reshaped, predictions)
-        self.metrics[acc_idx].update_state(labels_reshaped, logits_reshaped)
-        # Updates stateful loss metrics.
-        self.compiled_loss(labels_reshaped, logits_reshaped)
-        # Return metrics
-        return {m.name: m.result() for m in self.metrics}
+        return {m.name: m.result() for m in self.metrics}  # Return metrics
 
     def model(self, input_shape):
         # https://stackoverflow.com/questions/55235212/model-summary-cant-print-output-shape-while-using-subclass-model
         x = tf.keras.layers.Input(input_shape)
         return tf.keras.Model(inputs=[x], outputs=self(x))
+
+
+def copy_func(f):
+    """Based on http://stackoverflow.com/a/6528148/190597 (Glenn Maynard)"""
+    g = types.FunctionType(
+        f.__code__,
+        f.__globals__,
+        name=f.__name__,
+        argdefs=f.__defaults__,
+        closure=f.__closure__,
+    )
+    g = functools.update_wrapper(g, f)
+    g.__kwdefaults__ = f.__kwdefaults__
+    return g

@@ -7,12 +7,14 @@ from functools import partial
 from glob import glob
 from typing import List, Tuple
 
-
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
-import tensorflow as tf
+import PIL
 import sklearn.model_selection
+import tensorflow as tf
+from tqdm import tqdm
+
+from simclr.preprocess_ai4mars import get_ai4mars_filepaths
 
 FLAGS_color_jitter_strength = 0.3
 sys.path.insert(0, os.path.dirname(__file__))
@@ -177,6 +179,136 @@ def get_tf_dataset(X, ext, preprocess=False, width=256, height=256, shuffle=True
         return out_ds.shuffle(len(X), reshuffle_each_iteration=True)
     else:
         return out_ds
+
+
+@tf.function
+def normalize(img):
+    """MinMax Normalize from 0-255 to 0-1 with 0.5 mean?"""
+    img = tf.cast(img, tf.float32)
+    min_ = tf.reduce_min(img)
+    max_ = tf.reduce_max(img)
+    img = (img - min_) * (1.0 / (max_ - min_))
+    return img
+
+
+@tf.function
+def brighten(img, brightness=1.0, b=0.0, clip=True):
+    # img = tf.keras.preprocessing.image.apply_brightness_shift(img, brightness)
+    img = brightness * img + b
+    if clip:
+        return tf.clip_by_value(img, 0.0, 1.0)
+    else:
+        return img
+
+
+# @tf.function
+# def brighten_to_median(img, median=0.5):
+#     img_median = np.median(img)
+
+
+@tf.function
+def _load_preprocess_segmentation(d):
+    img = load_jpg(d["image_file"])
+    img = normalize(img)
+    img = brighten(img)
+
+    # if tf.io.gfile.exists(str(d["rover_mask"])):
+    rov_mask = load_png(d["rover_mask_file"])
+    # else:
+    # rov_mask = tf.zeros_like(img) + 100
+
+    # if tf.io.gfile.exists(str(d["range_mask"])):
+    rng_mask = load_png(d["range_mask_file"])
+    # else:
+    # rng_mask = tf.zeros_like(img)
+
+    img_mask = tf.clip_by_value(rov_mask + rng_mask, 0, 1)
+    img_mask = 1 - img_mask
+    img_mask = tf.cast(img_mask, tf.bool, name="img_mask_bool")
+
+    seg_mask = load_png(d["seg_mask_file"])
+    seg_mask = seg_mask[:, :, 0]
+
+    return {
+        "image": img,
+        "image_mask": img_mask,
+        "seg_mask": seg_mask,
+    }
+
+
+@tf.function
+def _load_ai4mars(d):
+    img = load_jpg(d["image_file"])
+    img = normalize(img)
+    seg_mask = load_png(d["seg_mask_file"])
+    seg_mask = seg_mask[:, :, 0]
+    if "mask_file" in d:
+        rover_range_mask = load_png(d["mask_file"])
+        rover_range_mask = tf.cast(rover_range_mask[:, :, 0], tf.bool)
+        # mask out areas with NULL labels (4)
+        combined_mask = tf.where(
+            tf.math.greater_equal(seg_mask, 4),
+            tf.ones_like(rover_range_mask, dtype=tf.bool),
+            rover_range_mask,
+        )
+        combined_mask = tf.logical_not(combined_mask)
+        return {
+            "image": img,
+            "image_mask": combined_mask,
+            "seg_mask": seg_mask,
+        }
+    else:  # Use this when rover and range masks are treated as classes 5 and 6.
+        return {
+            "image": img,
+            "seg_mask": seg_mask,
+        }
+
+
+def get_msl_seg_tfds(msl_folder, width=512, height=512, shuffle=True, split="train"):
+    join_ = os.path.join  # alias for join function since we use it so much
+    img_dir = join_(msl_folder, "images")
+    label_dir = join_(msl_folder, "labels", split)
+
+    mask_dir = join_(img_dir, "mxy")
+    # rng_dir = join_(img_dir, "rng-30m")
+    img_dir = join_(img_dir, "edr")
+
+    labels = glob(join_(label_dir, "*.png"))
+    filenames = [os.path.basename(os.path.splitext(l)[0]) for l in labels]
+
+    image_files = []
+    rov_mask_files = []
+    # range_mask_files = []
+    for i, fn in tqdm(enumerate(filenames)):
+        fn = fn.replace("_merged", "")
+        image_files.append(join_(img_dir, f"{fn}.JPG"))
+        rov_mask_files.append(join_(mask_dir, f"{fn.replace('EDR', 'MXY')}.png"))
+        # range_mask_files.append(join_(rng_dir, f"{fn.replace('EDR', 'RNG')}.png"))
+
+        assert os.path.isfile(image_files[-1]), f"{i}: {image_files[-1]} doesn't exist"
+        assert os.path.isfile(
+            rov_mask_files[-1]
+        ), f"{i}: {rov_mask_files[-1]} doesn't exist"
+        # assert os.path.isfile(range_mask_files[-1]), f"{i}: {range_mask_files[-1]} doesn't exist"
+
+    ds = tf.data.Dataset.from_tensor_slices(
+        {
+            "image_file": image_files,
+            "mask_file": rov_mask_files,
+            # "range_mask_file": range_mask_files,
+            "seg_mask_file": labels,
+        }
+    ).map(_load_ai4mars, num_parallel_calls=tf.data.AUTOTUNE)
+
+    return ds
+
+
+def get_ai4mars_tfds_masks_as_labels(msl_folder, split="train"):
+    images, _, _, labels = get_ai4mars_filepaths(msl_folder, split=split)
+    ds = tf.data.Dataset.from_tensor_slices(
+        {"image_file": images, "seg_mask_file": labels}
+    ).map(_load_ai4mars)
+    return ds
 
 
 def describe_folder(
