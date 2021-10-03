@@ -1,6 +1,7 @@
 import functools
 import math
 import types
+from typing import Dict
 
 import tensorflow as tf
 from absl import flags, logging
@@ -243,108 +244,43 @@ def get_atrous_conv_logits(
 class SegModel(tf.keras.models.Model):
     """Resnet model with projection or supervised layer."""
 
-    def __init__(
-        self,
-        num_classes,
-        image_size,
-        train_mode,
-        optimizer_name,
-        weight_decay=0,
-        resnet_depth=50,
-        sk_ratio=0.0,
-        width_multiplier=1,
-        proj_out_dim=128,
-        num_proj_layers=3,
-        ft_proj_selector=0,
-        head_mode="nonlinear",
-        fine_tune_after_block=-1,
-        linear_eval_while_pretraining=False,
-        **kwargs,
-    ):
+    def __init__(self, config: Dict, **kwargs):
         super(SegModel, self).__init__(**kwargs)
 
-        # keep track of all kwargs
-        self.num_classes = num_classes
-        self.image_size = image_size
-        self.train_mode = train_mode
-        self.fine_tune_after_block = fine_tune_after_block
-        self.linear_eval_while_pretraining = linear_eval_while_pretraining
-        self.optimizer_name = optimizer_name
-        self.weight_decay = weight_decay
-        self.resnet_depth = resnet_depth
-        self.sk_ratio = sk_ratio
-        self.width_multiplier = width_multiplier
-        self.proj_out_dim = proj_out_dim
-        self.num_proj_layers = num_proj_layers
-        self.ft_proj_selector = ft_proj_selector
-        self.head_mode = head_mode
-        self.fine_tune_after_block = fine_tune_after_block
-        self.linear_eval_while_pretraining = linear_eval_while_pretraining
+        self.config = config
+        self.train_mode = config["model_config"]["train_mode"]
         # Main model consists of resnet, proj head (and linear head if finetuning)
-        with self.distribute_strategy.scope():
-            self.resnet_model = resnet.resnet(
-                resnet_depth=resnet_depth,
-                width_multiplier=width_multiplier,
-                train_mode=train_mode,
-                fine_tune_after_block=fine_tune_after_block,
-                sk_ratio=sk_ratio,
-            )
-            self._projection_head = ProjectionHead(
-                proj_out_dim,
-                num_proj_layers,
-                ft_proj_selector,
-                head_mode,
-            )
-            if train_mode == "finetune":
-                dummy_inp = tf.keras.Input((self.image_size, self.image_size, 3))
+        with self.distribute_strategy.scope():  # TODO: see if can remove this
+            self.resnet_model = resnet.resnet(config["model_config"])
+            self._projection_head = ProjectionHead(config["model_config"])
+            if self.train_mode == "finetune":
                 self.atrous_block = AtrousConv2D(256)
                 self.supervised_layer = tf.keras.layers.Conv2D(
-                    filters=num_classes, kernel_size=1, padding="SAME", use_bias=False
+                    filters=config["data_config"]["num_classes"],
+                    kernel_size=1,
+                    padding="SAME",
+                    use_bias=False
                 )
 
     def get_config(self):
-        # config = super().get_config().copy()
-        config = {}
-        config.update(
-            {
-                "num_classes": self.num_classes,
-                "image_size": self.image_size,
-                "train_mode": self.train_mode,
-                "fine_tune_after_block": self.fine_tune_after_block,
-                "linear_eval_while_pretraining": self.linear_eval_while_pretraining,
-                "optimizer_name": self.optimizer_name,
-                "weight_decay": self.weight_decay,
-                "resnet_depth": self.resnet_depth,
-                "sk_ratio": self.sk_ratio,
-                "width_multiplier": self.width_multiplier,
-                "proj_out_dim": self.proj_out_dim,
-                "num_proj_layers": self.num_proj_layers,
-                "ft_proj_selector": self.ft_proj_selector,
-                "head_mode": self.head_mode,
-                "fine_tune_after_block": self.fine_tune_after_block,
-                "linear_eval_while_pretraining": self.linear_eval_while_pretraining,
-            }
-        )
-        return config
+        return self.config
 
     def call(self, inputs, training=False):
-        features = inputs
         # Base network forward pass.
-        hiddens = self.resnet_model(features, training=training, output_block=4)
+        resnet_out = self.resnet_model(inputs, training=training, output_block=4)
         # Add heads.
         # TODO: Add segmentation projection head for contrastive loss based on pixel embedding
         # projection_head_outputs, supervised_head_inputs = self._projection_head(
-        #     hiddens, training
+        #     resnet_out, training
         # )
-        supervised_head_inputs = hiddens
-        projection_head_outputs = hiddens
+        supervised_head_inputs = projection_head_outputs = resnet_out
         if self.train_mode == "finetune":
             output = self.atrous_block(supervised_head_inputs)
             output = tf.image.resize(output, [self.image_size, self.image_size])
             supervised_output = self.supervised_layer(output, training=training)
-            return hiddens, None, supervised_output
+            return resnet_out, None, supervised_output
         else:
-            return hiddens, projection_head_outputs, None
+            return resnet_out, projection_head_outputs, None
 
     def train_step(self, input_dict):
         loss = 0.0

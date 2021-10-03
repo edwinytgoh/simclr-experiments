@@ -85,50 +85,54 @@ class WarmUpAndCosineDecay(tf.keras.optimizers.schedules.LearningRateSchedule):
 
     def __init__(
         self,
-        base_learning_rate,
-        num_examples,
-        warmup_epochs,
-        total_epochs,
-        train_batch_size,
-        learning_rate_scaling,
+        config,
         name=None,
     ):
         super(WarmUpAndCosineDecay, self).__init__()
-        self.warmup_epochs = warmup_epochs
-        self.train_batch_size = train_batch_size
-        self.total_steps = num_examples * total_epochs // train_batch_size + 1
-        self.learning_rate_scaling = learning_rate_scaling
-        self.base_learning_rate = base_learning_rate
-        self.num_examples = num_examples
-
+        self.parse_config(config)
         self._name = name
+
+        iterations_per_epoch = self.num_examples // self.train_batch_size
+        self.total_steps = self.num_epochs * iterations_per_epoch + 1
+        self.calculate_scaled_lr()
+        self.warmup_steps = int(round(self.warmup_epochs * iterations_per_epoch))
+        with tf.name_scope(self._name or "WarmUpAndCosineDecay"):
+            initial_learning_rate = float(self.scaled_lr)
+            decay_steps = self.total_steps - self.warmup_steps
+            self.cosine_decay = tf.keras.experimental.CosineDecay(
+                initial_learning_rate, decay_steps
+            )
+        config["optimizer_config"]["learning_rate"] = self.scaled_lr
+
+    def parse_config(self, config):
+        opt_config = config["optimizer_config"]
+        self.warmup_epochs = opt_config["warmup_epochs"]
+        self.train_batch_size = config["data_config"]["batch_size"]
+        self.num_examples = config["data_config"]["num_train"]
+        self.num_epochs = config["train_config"]["num_epochs"]
+        self.learning_rate_scaling = opt_config["lr_scaling"]
+        self.base_learning_rate = opt_config["base_learning_rate"]
+
+    def calculate_scaled_lr(self):
+        if self.learning_rate_scaling == "linear":
+            self.scaled_lr = self.base_learning_rate * self.train_batch_size / 256.0
+        elif self.learning_rate_scaling == "sqrt":
+            self.scaled_lr = self.base_learning_rate * math.sqrt(self.train_batch_size)
+        else:
+            raise ValueError(f"Unknown LR scaling {self.learning_rate_scaling}")
 
     def __call__(self, step):
         with tf.name_scope(self._name or "WarmUpAndCosineDecay"):
-            warmup_steps = int(
-                round(self.warmup_epochs * self.num_examples // self.train_batch_size)
-            )
-            if self.learning_rate_scaling == "linear":
-                scaled_lr = self.base_learning_rate * self.train_batch_size / 256.0
-            elif self.learning_rate_scaling == "sqrt":
-                scaled_lr = self.base_learning_rate * math.sqrt(self.train_batch_size)
+            if self.warmup_steps:
+                learning_rate = tf.cast(step, tf.float32) / float(self.warmup_steps)
             else:
-                raise ValueError(
-                    "Unknown learning rate scaling {}".format(
-                        self.learning_rate_scaling
-                    )
-                )
-            learning_rate = (
-                step / float(warmup_steps) * scaled_lr if warmup_steps else scaled_lr
-            )
+                learning_rate = self.scaled_lr
 
             # Cosine decay learning rate schedule
-            # TODO(srbs): Cache this object.
-            cosine_decay = tf.keras.experimental.CosineDecay(
-                scaled_lr, self.total_steps - warmup_steps
-            )
             learning_rate = tf.where(
-                step < warmup_steps, learning_rate, cosine_decay(step - warmup_steps)
+                step < self.warmup_steps,
+                learning_rate,
+                self.cosine_decay(step - self.warmup_steps)
             )
 
             return learning_rate
@@ -179,17 +183,14 @@ class LinearLayer(tf.keras.layers.Layer):
 class ProjectionHead(tf.keras.layers.Layer):
     def __init__(
         self,
-        out_dim,
-        num_layers,
-        ft_proj_selector,
-        head_mode,
+        model_config,
         **kwargs,
     ):
-        self.out_dim = out_dim
-        self.num_layers = num_layers
-        self.ft_proj_selector = ft_proj_selector  # for finetuning
+        self.num_layers = model_config["proj_config"]["num_proj_layers"]
+        self.ft_proj_selector = model_config["proj_config"]["finetune_proj_selector"]
+        self.head_mode = model_config["proj_config"]["proj_head_mode"]
+        out_dim = model_config["proj_config"]["proj_out_dim"]
         self.linear_layers = []
-        self.head_mode = head_mode
         if self.head_mode == "none":
             pass  # directly use the output hiddens as hiddens
         elif self.head_mode == "linear":
@@ -198,59 +199,47 @@ class ProjectionHead(tf.keras.layers.Layer):
                     num_classes=out_dim, use_bias=False, use_bn=True, name="l_0"
                 )
             ]
+            self.num_layers = 1
         elif self.head_mode == "nonlinear":
-            for j in range(num_layers):
-                if j != num_layers - 1:
-                    # for the middle layers, use bias and relu for the output.
-                    self.linear_layers.append(
-                        LinearLayer(
-                            num_classes=lambda input_shape: int(input_shape[-1]),
-                            use_bias=True,
-                            use_bn=True,
-                            name="nl_%d" % j,
-                        )
+            for j in range(self.num_layers):
+                is_middle_layer = j != self.num_layers - 1
+                if is_middle_layer:  # use bias and relu for the output
+                    use_bias = use_bn = True
+                    num_classes = lambda input_shape: int(input_shape[-1])
+                else:  # final layer
+                    use_bias = False
+                    use_bn = True
+                    num_classes = out_dim
+                self.linear_layers.append(
+                    LinearLayer(
+                        num_classes=num_classes,
+                        use_bias=use_bias,
+                        use_bn=use_bn,
+                        name=f"nl_{j}",
                     )
-                else:
-                    # for the final layer, neither bias nor relu is used.
+                )
+                if is_middle_layer:
                     self.linear_layers.append(
-                        LinearLayer(
-                            num_classes=out_dim,
-                            use_bias=False,
-                            use_bn=True,
-                            name="nl_%d" % j,
-                        )
+                        tf.keras.layers.ReLU()
                     )
         else:
-            raise ValueError("Unknown head projection mode {}".format(head_mode))
+            raise ValueError("Unknown head projection mode {}".format(self.head_mode))
         super(ProjectionHead, self).__init__(**kwargs)
 
     def get_config(self):
         config = super().get_config().copy()
-        config.update({
-            "out_dim": self.out_dim,
-            "num_layers": self.num_layers,
-            "ft_proj_selector": self.ft_proj_selector,
-            "head_mode": self.head_mode
-        })
         return config
 
     def call(self, inputs, training):
         if self.head_mode == "none":
             return inputs  # directly use the output hiddens as hiddens
-        hiddens_list = [tf.identity(inputs, "proj_head_input")]
-        if self.head_mode == "linear":
+        elif self.head_mode == "linear":
             assert len(self.linear_layers) == 1, len(self.linear_layers)
-            hiddens_list.append(self.linear_layers[0](hiddens_list[-1], training))
-            return hiddens_list
-        elif self.head_mode == "nonlinear":
-            for j in range(self.num_layers):
-                hiddens = self.linear_layers[j](hiddens_list[-1], training)
-                if j != self.num_layers - 1:
-                    # for the middle layers, use bias and relu for the output.
-                    hiddens = tf.nn.relu(hiddens)
-                hiddens_list.append(hiddens)
-        else:
-            raise ValueError("Unknown head projection mode {}".format(self.head_mode))
+
+        hiddens_list = [tf.identity(inputs, "proj_head_input")]
+        for j in range(self.num_layers):
+            hiddens = self.linear_layers[j](hiddens_list[-1], training)
+            hiddens_list.append(hiddens)
         # The first element is the output of the projection head.
         # The second element is the input of the finetune head.
         proj_head_output = tf.identity(hiddens_list[-1], "proj_head_output")

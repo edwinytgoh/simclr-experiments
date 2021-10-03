@@ -591,201 +591,85 @@ class Resnet(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
         self,
         block_fn,
         layers,
-        width_multiplier,
-        train_mode="finetune",
-        fine_tune_after_block=-1,
+        model_config,
         cifar_stem=False,
-        sk_ratio=0.0,
         data_format="channels_last",
         dropblock_keep_probs=None,
         dropblock_size=None,
         **kwargs
     ):
         super(Resnet, self).__init__(**kwargs)
-        self.train_mode = train_mode
-        self.fine_tune_after_block = fine_tune_after_block
         self.data_format = data_format
+        self.train_mode = model_config["train_mode"]
+        self.fine_tune_after_block = model_config["resnet_config"]["finetune_after_block"]
+        width = model_config["resnet_config"]["width_multiplier"]
+        sk_ratio = model_config["resnet_config"]["sk_ratio"]
         if dropblock_keep_probs is None:
             dropblock_keep_probs = [None] * 4
         if not isinstance(dropblock_keep_probs, list) or len(dropblock_keep_probs) != 4:
             raise ValueError("dropblock_keep_probs is not valid:", dropblock_keep_probs)
         trainable = self.train_mode != "finetune" or self.fine_tune_after_block == -1
-        self.initial_conv_relu_max_pool = []
-        if cifar_stem:
-            self.initial_conv_relu_max_pool.append(
-                Conv2dFixedPadding(
-                    filters=64 * width_multiplier,
-                    kernel_size=3,
-                    strides=1,
-                    data_format=data_format,
-                    trainable=trainable,
-                )
-            )
-            self.initial_conv_relu_max_pool.append(
-                IdentityLayer(name="initial_conv", trainable=trainable)
-            )
-            self.initial_conv_relu_max_pool.append(
-                BatchNormRelu(data_format=data_format, trainable=trainable)
-            )
-            self.initial_conv_relu_max_pool.append(
-                IdentityLayer(name="initial_max_pool", trainable=trainable)
-            )
-        else:
-            if sk_ratio > 0:  # Use ResNet-D (https://arxiv.org/abs/1812.01187)
-                self.initial_conv_relu_max_pool.append(
-                    Conv2dFixedPadding(
-                        filters=64 * width_multiplier // 2,
-                        kernel_size=3,
-                        strides=2,
-                        data_format=data_format,
-                        trainable=trainable,
-                    )
-                )
-                self.initial_conv_relu_max_pool.append(
-                    BatchNormRelu(data_format=data_format, trainable=trainable)
-                )
-                self.initial_conv_relu_max_pool.append(
-                    Conv2dFixedPadding(
-                        filters=64 * width_multiplier // 2,
-                        kernel_size=3,
-                        strides=1,
-                        data_format=data_format,
-                        trainable=trainable,
-                    )
-                )
-                self.initial_conv_relu_max_pool.append(
-                    BatchNormRelu(data_format=data_format, trainable=trainable)
-                )
-                self.initial_conv_relu_max_pool.append(
-                    Conv2dFixedPadding(
-                        filters=64 * width_multiplier,
-                        kernel_size=3,
-                        strides=1,
-                        data_format=data_format,
-                        trainable=trainable,
-                    )
-                )
-            else:
-                self.initial_conv_relu_max_pool.append(
-                    Conv2dFixedPadding(
-                        filters=64 * width_multiplier,
-                        kernel_size=7,
-                        strides=2,
-                        data_format=data_format,
-                        trainable=trainable,
-                    )
-                )
-            self.initial_conv_relu_max_pool.append(
-                IdentityLayer(name="initial_conv", trainable=trainable)
-            )
-            self.initial_conv_relu_max_pool.append(
-                BatchNormRelu(data_format=data_format, trainable=trainable)
+
+        self.create_initial_layers(cifar_stem, data_format, sk_ratio, trainable, width)
+
+        num_blocks = len(layers)
+        self.block_groups = [None] * num_blocks
+        block_filters = [64, 128, 256, 512]
+        block_strides = [1, 2, 2, 2]
+        is_finetune = self.train_mode == "finetune"
+        for i in range(0, num_blocks):
+            self.block_groups[i] = BlockGroup(
+                filters=block_filters[i] * width,
+                block_fn=block_fn,
+                blocks=layers[i],
+                strides=block_strides[i],
+                sk_ratio=sk_ratio,
+                name=f"block_group{i+1}",
+                data_format=data_format,
+                dropblock_keep_prob=dropblock_keep_probs[i],
+                dropblock_size=dropblock_size,
+                trainable=(is_finetune and self.fine_tune_after_block == i),
             )
 
-            self.initial_conv_relu_max_pool.append(
+    def create_initial_layers(self, cifar_stem, data_format, sk_ratio, trainable, width):
+        if cifar_stem:
+            self.initial_conv_relu_max_pool = [
+                Conv2dFixedPadding(64 * width, 3, 1, data_format, trainable=trainable),
+                IdentityLayer(name="initial_conv", trainable=trainable),
+                BatchNormRelu(data_format=data_format, trainable=trainable),
+                IdentityLayer(name="initial_max_pool", trainable=trainable)
+            ]
+        else:
+            if sk_ratio > 0:  # Use ResNet-D (https://arxiv.org/abs/1812.01187)
+                convFP = Conv2dFixedPadding
+                half_width = width // 2
+                self.initial_conv_relu_max_pool = [
+                    convFP(64 * half_width, 3, 2, data_format, trainable=trainable),
+                    BatchNormRelu(data_format=data_format, trainable=trainable),
+                    convFP(64 * half_width, 3, 1, data_format, trainable=trainable),
+                    BatchNormRelu(data_format=data_format, trainable=trainable),
+                    convFP(64 * width, 3, 1, data_format, trainable=trainable),
+                ]
+            else:
+                self.initial_conv_relu_max_pool = [
+                    Conv2dFixedPadding(64 * width, 7, 2, data_format, trainable=trainable)
+                ]
+
+            self.initial_conv_relu_max_pool += [
+                IdentityLayer(name="initial_conv", trainable=trainable),
+                BatchNormRelu(data_format=data_format, trainable=trainable),
                 tf.keras.layers.MaxPooling2D(
                     pool_size=3,
                     strides=2,
                     padding="SAME",
                     data_format=data_format,
                     trainable=trainable,
-                )
-            )
-            self.initial_conv_relu_max_pool.append(
+                ),
                 IdentityLayer(name="initial_max_pool", trainable=trainable)
-            )
-
-        self.block_groups = []
-        # TODO(srbs): This impl is different from the original one in the case where
-        # fine_tune_after_block != 4. In that case earlier BN stats were getting
-        # updated. Now they will not be. Check with Ting to make sure this is ok.
-        if self.train_mode == "finetune" and self.fine_tune_after_block == 0:
-            trainable = True
-
-        self.block_groups.append(
-            BlockGroup(
-                filters=64 * width_multiplier,
-                block_fn=block_fn,
-                blocks=layers[0],
-                strides=1,
-                sk_ratio=sk_ratio,
-                name="block_group1",
-                data_format=data_format,
-                dropblock_keep_prob=dropblock_keep_probs[0],
-                dropblock_size=dropblock_size,
-                trainable=trainable,
-            )
-        )
-
-        if self.train_mode == "finetune" and self.fine_tune_after_block == 1:
-            trainable = True
-
-        self.block_groups.append(
-            BlockGroup(
-                filters=128 * width_multiplier,
-                block_fn=block_fn,
-                blocks=layers[1],
-                strides=2,
-                sk_ratio=sk_ratio,
-                name="block_group2",
-                data_format=data_format,
-                dropblock_keep_prob=dropblock_keep_probs[1],
-                dropblock_size=dropblock_size,
-                trainable=trainable,
-            )
-        )
-
-        if self.train_mode == "finetune" and self.fine_tune_after_block == 2:
-            trainable = True
-
-        self.block_groups.append(
-            BlockGroup(
-                filters=256 * width_multiplier,
-                block_fn=block_fn,
-                blocks=layers[2],
-                strides=2,
-                sk_ratio=sk_ratio,
-                name="block_group3",
-                data_format=data_format,
-                dropblock_keep_prob=dropblock_keep_probs[2],
-                dropblock_size=dropblock_size,
-                trainable=trainable,
-            )
-        )
-
-        if self.train_mode == "finetune" and self.fine_tune_after_block == 3:
-            trainable = True
-
-        self.block_groups.append(
-            BlockGroup(
-                filters=512 * width_multiplier,
-                block_fn=block_fn,
-                blocks=layers[3],
-                strides=2,
-                sk_ratio=sk_ratio,
-                name="block_group4",
-                data_format=data_format,
-                dropblock_keep_prob=dropblock_keep_probs[3],
-                dropblock_size=dropblock_size,
-                trainable=trainable,
-            )
-        )
-
-        if self.train_mode == "finetune" and self.fine_tune_after_block == 4:
-            # This case doesn't really matter.
-            trainable = True
+            ]
 
     def get_config(self):
         config = super().get_config().copy()
-        config.update(
-            {
-                "train_mode": self.train_mode,
-                "fine_tune_after_block": self.fine_tune_after_block,
-                "data_format": self.data_format,
-                "block_groups": self.block_groups,
-                "initial_conv_relu_max_pool": self.initial_conv_relu_max_pool,
-            }
-        )
         return config
 
     def call(self, inputs, training, output_block=None):
@@ -833,17 +717,7 @@ class Resnet(tf.keras.layers.Layer):  # pylint: disable=missing-docstring
         return inputs
 
 
-def resnet(
-    resnet_depth,
-    width_multiplier,
-    train_mode="finetune",
-    fine_tune_after_block=-1,
-    cifar_stem=False,
-    sk_ratio=0.0,
-    data_format="channels_last",
-    dropblock_keep_probs=None,
-    dropblock_size=None,
-):
+def resnet(model_config):
     """Returns the ResNet model for a given size and number of output classes."""
     model_params = {
         18: {"block": ResidualBlock, "layers": [2, 2, 2, 2]},
@@ -853,20 +727,12 @@ def resnet(
         152: {"block": BottleneckBlock, "layers": [3, 8, 36, 3]},
         200: {"block": BottleneckBlock, "layers": [3, 24, 36, 3]},
     }
-
+    resnet_depth = model_config["resnet_config"]["resnet_depth"]
     if resnet_depth not in model_params:
         raise ValueError("Not a valid resnet_depth:", resnet_depth)
-
     params = model_params[resnet_depth]
     return Resnet(
         params["block"],
         params["layers"],
-        width_multiplier,
-        train_mode,
-        fine_tune_after_block,
-        cifar_stem=cifar_stem,
-        sk_ratio=sk_ratio,
-        dropblock_keep_probs=dropblock_keep_probs,
-        dropblock_size=dropblock_size,
-        data_format=data_format,
+        model_config,
     )
