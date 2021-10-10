@@ -261,6 +261,7 @@ def _load_ai4mars(d):
         return {
             "image": img,
             "seg_mask": seg_mask,
+            "image_file": d["image_file"]
         }
 
 
@@ -308,7 +309,7 @@ def get_ai4mars_tfds_masks_as_labels(msl_folder, split="train"):
     ds = tf.data.Dataset.from_tensor_slices(
         {"image_file": images, "seg_mask_file": labels}
     ).map(_load_ai4mars)
-    return ds
+    return ds.shuffle(len(labels))
 
 
 def describe_folder(

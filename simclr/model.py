@@ -17,12 +17,13 @@
 
 import math
 
-import lars_optimizer
-import metrics
-import objective as obj_lib
-import resnet
 import tensorflow as tf
 from absl import flags
+
+import simclr.lars_optimizer as lars_optimizer
+import simclr.metrics as metrics
+import simclr.objective as obj_lib
+import simclr.resnet as resnet
 
 FLAGS = flags.FLAGS
 

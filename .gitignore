@@ -1,3 +1,7 @@
 .vscode
 .pyc
 __pycache__
+notebooks/
+*.ipynb_checkpoints*
+.vscode/launch.json
+*.egg-info*

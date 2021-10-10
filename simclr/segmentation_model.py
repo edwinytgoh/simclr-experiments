@@ -14,7 +14,9 @@ from simclr.resnet import BATCH_NORM_EPSILON
 
 
 FLAGS = flags.FLAGS
-
+NULL_CLASS = 4
+ROVER = 5
+RANGE = 6
 
 class AtrousConv2D(tf.keras.layers.Layer):
     def __init__(self, depth, *args, **kwargs):
@@ -289,12 +291,12 @@ class SegModel(tf.keras.models.Model):
                 fine_tune_after_block=fine_tune_after_block,
                 sk_ratio=sk_ratio,
             )
-            self._projection_head = ProjectionHead(
-                proj_out_dim,
-                num_proj_layers,
-                ft_proj_selector,
-                head_mode,
-            )
+            # self._projection_head = ProjectionHead(
+            #     proj_out_dim,
+            #     num_proj_layers,
+            #     ft_proj_selector,
+            #     head_mode,
+            # )
             if train_mode == "finetune":
                 dummy_inp = tf.keras.Input((self.image_size, self.image_size, 3))
                 self.atrous_block = AtrousConv2D(256)
@@ -373,17 +375,17 @@ class SegModel(tf.keras.models.Model):
         self.optimizer.apply_gradients(zip(grads, self.trainable_variables))
         return {m.name: m.result() for m in self.metrics}
 
-    def reshape_and_mask_labels_logits(self, input_dict, logits):
+    def reshape_and_mask_labels_logits(self, input_dict, logits, exclude_null=True):
         labels = input_dict["seg_mask"]
         labels_reshaped = tf.reshape(labels, [-1, 1])
         logits_reshaped = tf.reshape(logits, (-1, self.num_classes))
 
         labels_reshaped, logits_reshaped = self.mask_out_labels_and_logits(
-            input_dict, labels_reshaped, logits_reshaped
+            input_dict, labels_reshaped, logits_reshaped, exclude_null=exclude_null
         )
         return labels_reshaped, logits_reshaped
 
-    def mask_out_labels_and_logits(self, input_dict, labels_reshaped, logits_reshaped):
+    def mask_out_labels_and_logits(self, input_dict, labels_reshaped, logits_reshaped, exclude_null=True):
         if "image_mask" in input_dict:
             # mask out the labels:
             # True if include, False if masked out
@@ -396,6 +398,26 @@ class SegModel(tf.keras.models.Model):
                 ),
                 [-1, self.num_classes],
             )
+
+        if exclude_null:
+            null_mask = tf.equal(labels_reshaped, NULL_CLASS)
+            not_null = tf.logical_not(null_mask)
+            labels_reshaped = tf.boolean_mask(labels_reshaped, not_null)
+
+            # adjust remaining labels
+            # 4 – NULL --> DELETED
+            # 5 – rover mask ---> becomes 4
+            # 6 - range mask ---> becomes 5
+            labels_reshaped = tf.where(
+                labels_reshaped > NULL_CLASS,
+                labels_reshaped - 1,
+                labels_reshaped
+            )
+            logits_reshaped = tf.reshape(
+                tf.boolean_mask(logits_reshaped, tf.tile(not_null, [1, self.num_classes])),
+                [-1, self.num_classes]
+            )
+
         return labels_reshaped, logits_reshaped
 
     def update_loss_and_metrics(self, labels_reshaped, logits_reshaped):
@@ -443,7 +465,7 @@ class SegModel(tf.keras.models.Model):
         # loss = loss / strategy.num_replicas_in_sync
         return sup_loss
 
-    def test_step(self, input_dict):
+    def test_step(self, input_dict, return_masked_tensors=False):
         """The logic for one evaluation step.
 
         This method can be overridden to support custom evaluation logic.
@@ -470,7 +492,12 @@ class SegModel(tf.keras.models.Model):
             )
             sup_loss = self.update_loss_and_metrics(labels, logits)
 
-        return {m.name: m.result() for m in self.metrics}  # Return metrics
+        metrics = {m.name: m.result() for m in self.metrics}
+
+        if return_masked_tensors:
+            return labels, logits, metrics
+        else:
+            return metrics  # Return metrics
 
     def model(self, input_shape):
         # https://stackoverflow.com/questions/55235212/model-summary-cant-print-output-shape-while-using-subclass-model
